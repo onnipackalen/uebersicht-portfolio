@@ -1,0 +1,12 @@
+# your own data — never publish
+positions.json
+positions.backup-*.json
+positions_v*.json
+python.txt
+.cache/
+
+# macOS / Python clutter
+.DS_Store
+__pycache__/
+*.pyc
+*.tmp

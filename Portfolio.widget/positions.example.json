@@ -1,0 +1,124 @@
+{
+  "_about": "Demo portfolio: 22 large US stocks, 2 per sector, US$1,000 each at the 2025-12-31 close. The 3Y and 5Y tabs show what these same holdings would have done in the years before they were bought (a simulated backtest, compared with an index). Replace it with your own — use the widget's + button, or edit this file (see README.md).",
+  "_settings": {
+    "title": "demo portfolio",
+    "currency": "auto",
+    "alerts": false,
+    "news": false
+  },
+  "_watch": [
+    "AMD",
+    "SHOP.TO",
+    "BTC-USD"
+  ],
+  "ADBE": {
+    "shares": 2.8572,
+    "avgCost": 349.99,
+    "purchaseDate": "2025-12-31"
+  },
+  "AMGN": {
+    "shares": 3.0552,
+    "avgCost": 327.31,
+    "purchaseDate": "2025-12-31"
+  },
+  "AMT": {
+    "shares": 5.6957,
+    "avgCost": 175.57,
+    "purchaseDate": "2025-12-31"
+  },
+  "BKNG": {
+    "shares": 4.6682,
+    "avgCost": 214.2132,
+    "purchaseDate": "2025-12-31"
+  },
+  "BLK": {
+    "shares": 0.9343,
+    "avgCost": 1070.34,
+    "purchaseDate": "2025-12-31"
+  },
+  "CDNS": {
+    "shares": 3.1992,
+    "avgCost": 312.58,
+    "purchaseDate": "2025-12-31"
+  },
+  "CTVA": {
+    "shares": 14.9187,
+    "avgCost": 67.03,
+    "purchaseDate": "2025-12-31"
+  },
+  "ECL": {
+    "shares": 3.8092,
+    "avgCost": 262.52,
+    "purchaseDate": "2025-12-31"
+  },
+  "ICE": {
+    "shares": 6.1744,
+    "avgCost": 161.96,
+    "purchaseDate": "2025-12-31"
+  },
+  "IRM": {
+    "shares": 12.0555,
+    "avgCost": 82.95,
+    "purchaseDate": "2025-12-31"
+  },
+  "ISRG": {
+    "shares": 1.7657,
+    "avgCost": 566.36,
+    "purchaseDate": "2025-12-31"
+  },
+  "ITW": {
+    "shares": 4.0601,
+    "avgCost": 246.3,
+    "purchaseDate": "2025-12-31"
+  },
+  "KO": {
+    "shares": 14.3041,
+    "avgCost": 69.91,
+    "purchaseDate": "2025-12-31"
+  },
+  "MMM": {
+    "shares": 6.2461,
+    "avgCost": 160.1,
+    "purchaseDate": "2025-12-31"
+  },
+  "MO": {
+    "shares": 17.343,
+    "avgCost": 57.66,
+    "purchaseDate": "2025-12-31"
+  },
+  "OKE": {
+    "shares": 13.6054,
+    "avgCost": 73.5,
+    "purchaseDate": "2025-12-31"
+  },
+  "ORLY": {
+    "shares": 10.9637,
+    "avgCost": 91.21,
+    "purchaseDate": "2025-12-31"
+  },
+  "PEG": {
+    "shares": 12.4533,
+    "avgCost": 80.3,
+    "purchaseDate": "2025-12-31"
+  },
+  "SLB": {
+    "shares": 26.0552,
+    "avgCost": 38.38,
+    "purchaseDate": "2025-12-31"
+  },
+  "SPOT": {
+    "shares": 1.722,
+    "avgCost": 580.71,
+    "purchaseDate": "2025-12-31"
+  },
+  "VZ": {
+    "shares": 24.5519,
+    "avgCost": 40.73,
+    "purchaseDate": "2025-12-31"
+  },
+  "WEC": {
+    "shares": 9.4823,
+    "avgCost": 105.46,
+    "purchaseDate": "2025-12-31"
+  }
+}

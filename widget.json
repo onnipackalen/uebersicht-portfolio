@@ -1,0 +1,6 @@
+{
+  "name": "Portfolio",
+  "description": "Track stocks, ETFs and crypto on your desktop: value graph with years of history and an index to beat, heatmap, real returns, dividends, risk, alerts and news. Several windows, each showing what you pick; any currency. Prices from Yahoo Finance; needs Python 3 + yfinance (setup script included).",
+  "author": "Markus Packalen",
+  "email": "onnipackalen@gmail.com"
+}
