@@ -274,7 +274,8 @@ back to the default width or to "fit content".
 **⚙** in the title row opens the editor for that window:
 
 - **window** — title; **+ new window** from a template (full, graph only,
-  holdings, news & alerts, ticker line, blank), duplicate, one line, delete;
+  holdings, news & alerts, news page, ticker line, blank), duplicate, one
+  line, delete;
   **reset everything** to the default look.
 - **size** — exact width and height (empty height = fit content), zoom
   60–160%, and whether the left panels rotate or stack.
@@ -292,6 +293,55 @@ back to the default width or to "fit content".
 Each window keeps its own range, mode, page and view. Everything is saved in
 `_settings.display` and survives restarts; without it you get the single
 default widget. Adding a **news** panel turns headlines on.
+
+### News page
+
+The news panel shows the day's movers' headlines. A **news page** shows
+headlines for whatever you choose — every holding, the watchlist, tickers
+you type — with its own order, time span and layout, per window.
+
+To add one: **⚙ → + new window → news page** (a 480×560 window with a news
+panel set to every holding and the watchlist, 5 headlines per stock, newest
+first; it turns headlines on). Or switch the **news** panel on in any window:
+its options appear under it in the editor's features list, and clicking any
+of them turns that panel into a news page (a news panel you never touch
+keeps working as before). The **⚙** chip next to the panel's "news" line
+opens the editor at those options.
+
+| in the editor | JSON key (`windows[i].news`) | values | default |
+|---|---|---|---|
+| **whose**: movers · holdings · watchlist · both · pick… | `scope` | `movers`, `holdings`, `watch`, `all`, `pick` | `movers` — holdings moving more than 3% today, as before |
+| **tickers** (a box shown for pick…; Enter or click away keeps them, Esc reverts; each accepted ticker becomes a chip with ×, a wrong one says "not a ticker") | `tickers` | up to 40 symbols, held or not | `[]` |
+| **per stock**: 1 · 3 · 5 · 10 | `per` | 1–10 (Yahoo gives about 10) | `3` |
+| **order**: newest · movers · A–Z | `sort` | `new`, `move`, `ticker` | `move` — biggest movers first, the stock open in that window first of all |
+| **since**: today · 3 days · week · all | `span` | `day`, `3d`, `week`, `all` | `all` |
+| **layout**: dense | `dense` | `true` / `false` | `false` — one 14 px line per story instead of title + source line |
+| **layout**: group by ticker | `group` | `true` / `false` | `false` — a heading per ticker ("KO · +2.1% · 3") |
+| **layout**: source | `sources` | `true` / `false` | `true` — show the source and the time |
+| **muted**: one chip per hidden ticker, **unmute all** | `mute` | up to 40 symbols | `[]` |
+| **keyword** (read-only chip; typed in the panel) | `q` | up to 60 characters | `""` |
+
+Inside the panel: the **filter box** narrows the feed as you type (title,
+source or ticker); **Enter** saves the keyword (`q`), **Esc** clears it. In a
+column narrower than 240 px the box appears only while a keyword is set.
+Clicking a **ticker tag** opens that stock's detail when the window has a
+holdings panel, otherwise it narrows the feed to that ticker. **×** next to a
+tag (on hover) mutes the ticker in that window. The line under the rows says
+when headlines were last fetched, "fetching N more…" while some are still
+on their way, "N unavailable" when Yahoo had none, and offers chips to clear
+an active filter, mute list or time span. A story about several of your
+tickers is shown once with all of them. Default options are not saved: a news
+page with the defaults is `"news": {}`.
+
+Requests: with a news page Yahoo is asked for the headlines of every held,
+watched or picked symbol in scope — not only today's movers — and so sees
+which symbols you follow (see Privacy). The tracker asks for one request per
+symbol per 30 minutes, at most 12 per refresh (4 at a time), so a page for
+60 holdings fills over about 5 refreshes (~25 minutes); with more than 72
+symbols in scope some are always waiting. Changing the options never causes
+extra requests, except a new scope or a newly picked ticker (at most one such
+refresh per minute). A symbol Yahoo has no headlines for is retried after 10
+minutes, then every 30.
 
 ## Compact mode, export, backups, menu bar
 
@@ -348,7 +398,7 @@ out for its default. Most are set for you by clicking in the widget.
 | `portfolioAlertThreshold` | `2.5` | the daily move (%) of the whole portfolio that alerts |
 | `targets` | none | your target mix, for drift and rebalancing |
 | `rebalanceWhole` | automatic | rebalance in whole shares (`true`) or fractional (`false`) |
-| `display` | none | your windows and what each shows (the **⚙** editor) |
+| `display` | none | your windows and what each shows (the **⚙** editor), incl. a window's news page options (`news`) |
 | `position`, `scale` | none | the single window's spot and zoom from before windows existed |
 
 For example:
@@ -397,8 +447,10 @@ In detail:
 - `display`: your windows and what each shows — set by the ⚙ editor, rarely
   edited by hand. Shape: `{"windows": [{"id": "main", "title": "…", "x": 40,
   "y": 40, "w": 664, "h": "auto", "zoom": 1, "items": ["graph", "panel.news",
-  …], "prio": {"panel.news": "always"}, "side": {…}, "carousel": "rotate"}]}`
-  (1–8 windows; feature ids are listed in `display_prefs.py`). Remove it to
+  …], "prio": {"panel.news": "always"}, "side": {…}, "carousel": "rotate",
+  "news": {"scope": "all", "per": 5}}]}` (1–8 windows; feature ids are listed
+  in `display_prefs.py`; a window's `news` object holds its news page options,
+  see "News page" above — leave it out for the plain news panel). Remove it to
   get the default single widget back.
 - `position` / `scale`: the default window's spot and zoom from before
   windows existed (still honoured; the editor moves them into `display`).
@@ -461,7 +513,10 @@ stock *has* moved, not a forecast.
   for your tickers, the index and exchange rates (about every 5 minutes while
   Übersicht runs), your searches in the + form, and headlines only when
   `news` is on. Yahoo sees which symbols are asked for — never how many
-  shares you hold or what you paid.
+  shares you hold or what you paid. With the plain news panel that means
+  the holdings that moved more than 3% today; with a news page it is every
+  symbol in that page's scope — all your holdings, the watchlist, or the
+  tickers you picked.
 - Sharing a screenshot shows your numbers; the demo portfolio is there for
   that.
 

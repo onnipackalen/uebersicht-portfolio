@@ -34,7 +34,12 @@ text is not lower-cased; "default" removes it, "reset-all" removes it and
 position, scale, graphBig, showBenchmark and compact in one write). A
 benchmark change needs the new index's prices, so it also writes
 .cache/refresh.request (only when it changed): the widget's next refresh
-fetches them.
+fetches them. So does a display change whose news page (13.1,
+display_prefs.news_plan) asks for headlines the tracker did not plan
+before: a new scope, or a picked ticker without a fresh .cache/news.json
+entry — at most one such request per NEWS_REQUEST_GAP seconds (the mtime
+of .cache/news.request); per, sort, span, group, dense, sources, mute, q
+and removals never ask for one.
 Prints one line of JSON and nothing else: {"ok": true, "key": ...,
 "value": ...} or {"error": "..."}. Standard library only, so any python3
 can run it.
@@ -47,6 +52,7 @@ import json
 import os
 import re
 import sys
+import time
 
 import display_prefs
 import portfolio_file as pf
@@ -66,6 +72,9 @@ UI_DEFAULT = {"position": None, "scale": 1, "display": None}
 # these values (the tracker's defaults) — one write each
 RESET_ALL = (("display", None), ("position", None), ("scale", 1),
              ("graphBig", False), ("showBenchmark", True), ("compact", False))
+# a news page change asks for a refresh at most this often (seconds)
+NEWS_REQUEST_GAP = 60
+NEWS_TTL, NEWS_FAIL_TTL = 1800, 600     # portfolio_tracker.news_fresh, inline
 
 
 def reply(obj, code=0):
@@ -168,6 +177,61 @@ def patch_cached_ui(positions, updates):
             pass
 
 
+def news_entry_fresh(entry, now):
+    """portfolio_tracker.news_fresh without importing it: t within
+    NEWS_TTL, or NEWS_FAIL_TTL for an error entry."""
+    t = entry.get("t") if isinstance(entry, dict) else None
+    if isinstance(t, bool) or not isinstance(t, (int, float)):
+        return False
+    return 0 <= now - t < (NEWS_FAIL_TTL if entry.get("error") else NEWS_TTL)
+
+
+def news_refresh_wanted(old_plan, new_plan, positions):
+    """True when the new news plan (display_prefs.news_plan) asks for
+    headlines the old one did not: a scope the old plan lacked, or a picked
+    ticker it lacked that has no fresh entry in .cache/news.json."""
+    if not new_plan:
+        return False
+    old = old_plan or {"scopes": [], "tickers": []}
+    old_scopes = set(old["scopes"])
+    if old_plan:
+        old_scopes.add("movers")        # the tracker always plans the movers
+    if set(new_plan["scopes"]) - old_scopes:
+        return True
+    new_picks = set(new_plan["tickers"]) - set(old["tickers"])
+    if not new_picks:
+        return False
+    try:
+        with open(os.path.join(pf.cache_dir(positions), "news.json")) as f:
+            cache = json.load(f)
+    except Exception:
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    now = time.time()
+    return any(not news_entry_fresh(cache.get(tk), now) for tk in new_picks)
+
+
+def request_news_refresh(positions):
+    """pf.request_refresh, at most once per NEWS_REQUEST_GAP (a change
+    inside that minute waits for the regular refresh). Best effort."""
+    try:
+        d = pf.cache_dir(positions)
+        marker = os.path.join(d, "news.request")
+        try:
+            if time.time() - os.stat(marker).st_mtime < NEWS_REQUEST_GAP:
+                return False
+        except OSError:
+            pass
+        os.makedirs(d, exist_ok=True)
+        with open(marker, "w") as f:
+            f.write("%d\n" % time.time())
+        pf.request_refresh(positions)
+        return True
+    except Exception:
+        return False
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = JsonArgs()
@@ -196,6 +260,7 @@ def main():
             if not isinstance(settings, dict):
                 pf.fail("_settings in positions.json should be an object — fix it first")
             changed = False
+            old_plan = display_prefs.news_plan(settings.get("display")) if args.key == "display" else None
             if value is display_prefs.RESET:   # "display reset-all"
                 for k, _ in RESET_ALL:
                     if k in settings:
@@ -221,6 +286,11 @@ def main():
             # new data needed (none for the choice already saved): one fetch with the new index (whose long
             # history the history job then plans like any other)
             pf.request_refresh(args.positions)
+        if args.key == "display" and changed and value is not display_prefs.RESET:
+            # a news page asking for headlines the tracker never planned
+            if news_refresh_wanted(old_plan, display_prefs.news_plan(settings.get("display")),
+                                   args.positions):
+                request_news_refresh(args.positions)
     except SystemExit:
         msg = buf.getvalue().strip()
         reply({"error": msg[len("error: "):] if msg.startswith("error: ") else msg or "failed"}, 1)

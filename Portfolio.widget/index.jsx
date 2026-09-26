@@ -40,7 +40,7 @@ const SORT_TIP = {
 // (that crashed the 12.x upgrade with "undefined is not an object"), so any
 // state not stamped with this version starts over, keeping only the data
 // that is already on screen. Bump it whenever the state's shape changes.
-const STATE_VERSION = "13.0";
+const STATE_VERSION = "13.1";
 
 // older day-by-day rows loaded on demand ("older ›", an old date typed in the
 // date box, a custom start before the newest ~400 days). `key` ties them to
@@ -96,6 +96,8 @@ export const initialState = {
   newsBy: {},            // ticker -> {items, busy, error}: headlines per stock (was the one-slot `news`)
   editOpen: false, editGroup: null, editConfirm: null,   // the ⚙ editor (per window)
   newsPage: 0,           // the news panel's page (per window)
+  newsQuery: null, newsQFrom: "",   // the news page's live keyword (13.1; newsQFrom = the cfg.q it was typed over; not saved)
+  newsPickMsg: null,     // the news page editor's "not a ticker: …" note (5 s)
 };
 
 // Per-window state: every window keeps its own copy of these (range, pinned
@@ -104,7 +106,7 @@ const WIN_KEYS = ["range", "graphMode", "plMode", "view", "mapRange", "mapExpand
   "pinnedSection", "focusTicker", "lookTicker", "showAdd", "detailRange", "detailMsg", "mark", "hoverT", "dayInput",
   "dayMsg", "dayPage", "earnPage", "sectorScale", "sectorOrder", "from", "sectorFocus", "btMode", "salesExpanded",
   "alertInput", "alertMsg", "alertBusy", "alertMsgTick", "alertsExpanded", "rebalExpanded", "benchPick",
-  "benchInput", "benchMsg", "rot", "hover", "editOpen", "editGroup", "editConfirm", "newsPage"];
+  "benchInput", "benchMsg", "rot", "hover", "editOpen", "editGroup", "editConfirm", "newsPage", "newsQuery", "newsQFrom", "newsPickMsg"];
 const WIN_INITIAL = {};
 WIN_KEYS.forEach((k) => { WIN_INITIAL[k] = initialState[k]; });
 
@@ -215,6 +217,7 @@ const LAYOUT_K = {
   MONO: 0.62, TAB_PAD: 14, TAB_PAD_TIGHT: 8, TAB_BIG: 20, TAB_RESERVE: 80, DATE_BOX: 82, SEP: 16,
   CHROME: 38, GAP: 19, HDR1: 29, HDRN: 13, TABS: 16, READOUT: 15, GRAPH_MT: 4, AXIS: 12, NOTES: 11,
   CAPTION: 11, SIMCAP: 11, EYEBROW: 13, ROW_HOLD: 16, ROW_EARN: 15, ROW_DAY: 15, ROW_NEWS: 27,
+  ROW_NEWS_DENSE: 14, ROW_NEWS_GROUP: 14, NEWS_FILTER: 18, NEWS_STATUS: 11,
   ROW_ALERT: 13, ROW_LINE: 13, DOTS: 15, PAGER: 16, FOOTER: 11, LOADING: 18, HINT: 14, MINI: 36,
   ADD_FORM: 124, STAT: 16, BENCH_PICK: 180, COMPACT_SPARK: 90,
   // panel estimates (est.* in renderWin): fixed parts and one row each
@@ -319,7 +322,10 @@ const TEMPLATES = [
   { key: "graph", label: "graph only", items: pickItems(HEAD2.concat(["graph"])), w: WIDGET_W, h: 260 },
   { key: "holdings", label: "holdings", w: 380, h: "auto",
     items: pickItems(HEAD2.concat(["panel.holdings"], FULL_ITEMS.filter((id) => FEATURE_BY[id].kind === "cell"))) },
-  { key: "news", label: "news & alerts", items: HEAD2.concat(["panel.news", "panel.priceAlerts", "panel.alerts"]), w: 360, h: 420, news: true },
+  { key: "news", label: "news & alerts", items: HEAD2.concat(["panel.news", "panel.priceAlerts", "panel.alerts"]), w: 360, h: 420, news: true,
+    tip: "today's movers' headlines, price alerts and alerts" },
+  { key: "newspage", label: "news page", items: HEAD2.concat(["panel.news"]), w: 480, h: 560, news: true,
+    newsCfg: { scope: "all", per: 5, sort: "new" }, tip: "headlines for every holding and the watchlist — turns headlines on" },
   { key: "ticker", label: "ticker line", items: HEAD2.slice(), compact: true, w: 420 },
   { key: "blank", label: "blank", items: [], w: 360, h: 200 },
 ];
@@ -330,7 +336,7 @@ const TEMPLATES = [
 const WIN_ID_RE = /^[a-z][a-z0-9]{0,11}$/;
 const FEATURE_ID_RE = /^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)*$/;
 const WIN_W_MIN = 300, WIN_W_MAX = 1400, WIN_H_MIN = 160, WIN_H_MAX = 2000, MAX_WINDOWS = 8;
-const WIN_FIELDS = ["id", "title", "x", "y", "w", "h", "zoom", "items", "prio", "side", "carousel", "compact", "graphBig"];
+const WIN_FIELDS = ["id", "title", "x", "y", "w", "h", "zoom", "items", "prio", "side", "carousel", "compact", "graphBig", "news"];
 const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
 // titles as display_prefs counts them: code points, no control/C1 chars, no
 // U+2028/2029, no lone surrogates
@@ -339,6 +345,55 @@ const lone = (c) => c.length === 1 && c >= "\ud800" && c <= "\udfff";
 const titleOk = (t) => {
   const cs = Array.from(t);
   return cs.length >= 1 && cs.length <= 40 && !cs.some(lone) && !new RegExp(TITLE_BAD_CH.source).test(t);
+};
+// The news page's options (13.1, windows[i].news; display_prefs.py mirrors
+// them): absent = the 13.0 news panel, present (even {}) = the news page.
+// Default-valued fields are dropped inside, the object itself is kept.
+const NEWS_TICKER_RE = /^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$/;
+const NEWS_SCOPES = ["movers", "holdings", "watch", "all", "pick"];
+const NEWS_SORTS = ["new", "move", "ticker"];
+const NEWS_SPANS = ["day", "3d", "week", "all"];
+const NEWS_LIST_MAX = 40, NEWS_Q_MAX = 60, NEWS_DENSE_TAGS = 3;   // dense rows show 3 tags + "+n"
+const NEWS_DEF = { scope: "movers", tickers: [], per: 3, sort: "move", span: "all", group: false, dense: false, sources: true, mute: [], q: "" };
+// control, format (soft hyphen, zero-width, bidi, BOM…) and private-use code points
+const NEWS_Q_BAD = /[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\ue000-\uf8ff]|\ud804[\udcbd\udccd]|\ud80d[\udc30-\udc3f]|\ud82f[\udca0-\udca3]|\ud834[\udd73-\udd7a]|\udb40[\udc01\udc20-\udc7f]|[\udb80-\udbff][\udc00-\udfff]/;
+const newsQOk = (q) => {
+  const cs = Array.from(q);
+  return cs.length <= NEWS_Q_MAX && !cs.some(lone) && !NEWS_Q_BAD.test(q);
+};
+// a ticker list: upper-cased, TICKER_RE, deduped, order kept, at most 40 (null = not a list)
+const newsList = (v) => {
+  if (!Array.isArray(v)) return null;
+  const out = [], seen = {};
+  v.forEach((t) => {
+    const x = typeof t === "string" ? t.trim().toUpperCase() : "";
+    if (x && NEWS_TICKER_RE.test(x) && !seen[x] && out.length < NEWS_LIST_MAX) { seen[x] = true; out.push(x); }
+  });
+  return out;
+};
+// lenient like display_prefs.clean_display: a bad field is dropped, the rest
+// kept; null when `news` is not an object (then it is dropped)
+const normNews = (v) => {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = {};
+  if (NEWS_SCOPES.indexOf(v.scope) >= 0 && v.scope !== NEWS_DEF.scope) o.scope = v.scope;
+  const tk = newsList(v.tickers);
+  if (tk && tk.length) o.tickers = tk;
+  if (isNumber(v.per) && Math.round(v.per) === v.per && v.per >= 1 && v.per <= 10 && v.per !== NEWS_DEF.per) o.per = v.per;
+  if (NEWS_SORTS.indexOf(v.sort) >= 0 && v.sort !== NEWS_DEF.sort) o.sort = v.sort;
+  if (NEWS_SPANS.indexOf(v.span) >= 0 && v.span !== NEWS_DEF.span) o.span = v.span;
+  if (v.group === true) o.group = true;
+  if (v.dense === true) o.dense = true;
+  if (v.sources === false) o.sources = false;
+  const mu = newsList(v.mute);
+  if (mu && mu.length) o.mute = mu;
+  if (typeof v.q === "string" && v.q && newsQOk(v.q)) o.q = v.q;
+  return o;
+};
+// the options with the defaults filled in; null = the 13.0 path (no `news`)
+const newsCfgOf = (win) => {
+  const n = win && win.news ? normNews(win.news) : null;
+  return n ? Object.assign({}, NEWS_DEF, n) : null;
 };
 const cleanMap = (m, ok, cap) => {
   if (!m || typeof m !== "object" || Array.isArray(m)) return null;
@@ -373,6 +428,8 @@ const normWindow = (w) => {
   if (w.carousel === "rotate" || w.carousel === "stack") o.carousel = w.carousel;
   if (typeof w.compact === "boolean") o.compact = w.compact;
   if (typeof w.graphBig === "boolean") o.graphBig = w.graphBig;
+  const nw = normNews(w.news);
+  if (nw) o.news = nw;
   return o;
 };
 const normDisplay = (obj) => {
@@ -394,6 +451,7 @@ const compactWindow = (w) => {
         (k === "carousel" && v === "rotate") || ((k === "compact" || k === "graphBig") && v === false)) return;
     if (k === "items" && v.length === FULL_ITEMS.length && v.every((id, i) => id === FULL_ITEMS[i])) return;
     if ((k === "prio" || k === "side") && !Object.keys(v).length) return;
+    if (k === "news") { const nw = normNews(v); if (nw) o.news = nw; return; }
     o[k] = v;
   });
   return o;
@@ -693,6 +751,10 @@ const coreReducer = (event, prev) => {
       pos: false, scale: 1, graphBig: false, showBench: true, compact: false });
     case "EDIT_CONFIRM": return merge(prev, { editConfirm: event.what || null });
     case "SET_NEWS_PAGE": return merge(prev, { newsPage: Math.max(0, Math.round(event.page) || 0) });
+    // the news page's live keyword (13.1): typed over cfg.q `from`; a cfg.q change from elsewhere wins again
+    case "SET_NEWS_QUERY": return merge(prev, { newsQuery: typeof event.value === "string" ? event.value : null,
+      newsQFrom: typeof event.from === "string" ? event.from : "", newsPage: 0 });
+    case "NEWS_PICK_MSG": return merge(prev, { newsPickMsg: typeof event.msg === "string" ? event.msg : null });
     default: return prev;
   }
 };
@@ -992,7 +1054,9 @@ const fmtAxis = (v, step) => {
   if (step < 1) return sign + sym + num(a, Math.min(2, curDigits()));
   if (a >= 1000) {
     if (step < 100) return sign + sym + num(Math.round(a), 0);
-    const dec = step < 500 ? 2 : step < 5000 ? 1 : 0;
+    // steps are 1 / 2 / 5 × a power of ten, so one decimal tells 100-step
+    // ticks apart ("$298.4k"); two ("$298.40k") ran into the graph's edge
+    const dec = step < 1000 ? 1 : 0;
     return sign + sym + (a / 1000).toFixed(dec) + "k";
   }
   return sign + sym + Math.round(a);
@@ -3563,6 +3627,139 @@ const newsFeedOf = (d, state) => {
   return { rows: out, busy: !!(nw && nw.busy) };
 };
 
+// ---- the news page (13.1): a window whose `news` options are set (newsCfgOf).
+// The keyword in force: the one typed in the panel while cfg.q is still what
+// it was typed over, else cfg.q (the editor or the file changed it).
+const newsQueryOf = (state, cfg) => (typeof state.newsQuery === "string" && state.newsQFrom === cfg.q ? state.newsQuery : cfg.q);
+// today's move of a held OR watched ticker
+const newsMoveOf = (d, tk) => {
+  const v = dayMoveOf(d, tk);
+  if (isFin(v)) return v;
+  const w = (Array.isArray(d.watchlist) ? d.watchlist : []).find((x) => x && x.ticker === tk);
+  return w && isFin(w.dayChangePct) ? w.dayChangePct : undefined;
+};
+const heldTickers = (d) => (Array.isArray(d.positions) ? d.positions : [])
+  .filter((p) => p && typeof p.ticker === "string" && p.watch !== true && (isFin(p.shares) ? p.shares > 0 : isFin(p.qty) && p.qty > 0)).map((p) => p.ticker);
+const watchTickers = (d) => (Array.isArray(d.watchlist) ? d.watchlist : []).filter((w) => w && typeof w.ticker === "string").map((w) => w.ticker);
+const NEWS_SPAN_DAYS = { day: 1, "3d": 3, week: 7 };
+const NEWS_SPAN_TEXT = { day: "today", "3d": "in the last 3 days", week: "this week" };
+const NEWS_SPAN_CHIP = { day: "last day", "3d": "3 days", week: "week" };
+const NEWS_SPAN_TIP = { day: "today", "3d": "last 3 days", week: "last week", all: "any time" };
+const NEWS_SCOPE_TEXT = { movers: "today's movers", holdings: "every holding", watch: "watchlist", all: "holdings + watchlist" };
+const NEWS_SORT_TIP = { new: "newest first", move: "biggest movers first", ticker: "A–Z" };
+// the dedupe key: the url without its utm_* parameters, else the title
+const newsKey = (it) => {
+  if (typeof it.url === "string" && it.url) {
+    const q = it.url.indexOf("?");
+    if (q < 0) return "u:" + it.url;
+    const rest = it.url.slice(q + 1).split("&").filter((p) => p.slice(0, 4).toLowerCase() !== "utm_");
+    return "u:" + it.url.slice(0, q) + (rest.length ? "?" + rest.join("&") : "");
+  }
+  return "t:" + String(it.title).trim().toLowerCase();
+};
+const az = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const newsT = (r) => (isFin(r.time) ? r.time : -1e15);
+const timeDesc = (a, b) => newsT(b) - newsT(a);
+// scope → mute → span → keyword → cfg.per per ticker → dedupe → sort → group
+const newsPageFeed = (d, state, cfg) => {
+  const n = d && d.news && d.news.on === true && d.news.items && typeof d.news.items === "object" ? d.news : null;
+  const top = n && Array.isArray(n.top) ? n.top.filter((t) => typeof t === "string") : [];
+  const focus = typeof state.focusTicker === "string" && state.focusTicker ? state.focusTicker : null;
+  let scope, scopeEmpty = false;
+  if (cfg.scope === "holdings") scope = heldTickers(d);
+  else if (cfg.scope === "watch") { scope = watchTickers(d); scopeEmpty = !scope.length; }
+  else if (cfg.scope === "all") scope = heldTickers(d).concat(watchTickers(d));
+  else if (cfg.scope === "pick") { scope = cfg.tickers.slice(); scopeEmpty = !scope.length; }
+  else { scope = top.slice(); scopeEmpty = !top.length; if (focus && scope.indexOf(focus) < 0) scope.unshift(focus); }
+  const seenTk = {};
+  scope = scope.filter((t) => !seenTk[t] && (seenTk[t] = true));
+  const muted = {};
+  cfg.mute.forEach((t) => { muted[t] = true; });
+  const live = scope.filter((t) => !muted[t]);
+  const q = newsQueryOf(state, cfg).toLowerCase();
+  const now = Date.now() / 1000, spanS = NEWS_SPAN_DAYS[cfg.span] ? NEWS_SPAN_DAYS[cfg.span] * 86400 : 0;
+  const nw = focus && cfg.scope === "movers" ? newsOf(state, focus) : null;
+  const own = nw && Array.isArray(nw.items) ? nw.items.filter((it) => it && typeof it.title === "string" && it.title) : [];
+  let nItems = 0, nSpan = 0, nQ = 0;
+  const byKey = {}, rows = [];
+  live.forEach((tk) => {
+    let list = tk === focus && own.length ? own : newsItemsOf(d, tk);
+    nItems += list.length;
+    if (spanS) list = list.filter((it) => isFin(it.time) && now - it.time <= spanS);
+    nSpan += list.length;
+    if (q) list = list.filter((it) => it.title.toLowerCase().indexOf(q) >= 0 ||
+      (typeof it.source === "string" && it.source.toLowerCase().indexOf(q) >= 0) || tk.toLowerCase().indexOf(q) >= 0);
+    nQ += list.length;
+    list.slice(0, cfg.per).forEach((it) => {
+      const k = newsKey(it);
+      let r = byKey[k];
+      if (!r) {
+        r = byKey[k] = { title: it.title, source: typeof it.source === "string" ? it.source : "", time: isFin(it.time) ? it.time : null,
+          url: typeof it.url === "string" ? it.url : "", tickers: [], move: null };
+        rows.push(r);
+      }
+      if (r.tickers.indexOf(tk) < 0) r.tickers.push(tk);
+    });
+  });
+  rows.forEach((r) => {
+    r.tickers.sort(az);
+    r.move = r.tickers.reduce((m, t) => { const v = newsMoveOf(d, t); return isFin(v) && (m === null || Math.abs(v) > Math.abs(m)) ? v : m; }, null);
+  });
+  const focusFirst = (a, b) => (focus ? (b.tickers.indexOf(focus) >= 0 ? 1 : 0) - (a.tickers.indexOf(focus) >= 0 ? 1 : 0) : 0);
+  const moveDesc = (a, b) => (a.move === null ? 1 : 0) - (b.move === null ? 1 : 0) || (a.move === null ? 0 : Math.abs(b.move) - Math.abs(a.move));
+  if (cfg.sort === "new") rows.sort((a, b) => timeDesc(a, b) || az(a.tickers[0], b.tickers[0]) || az(a.title, b.title));
+  else if (cfg.sort === "ticker") rows.sort((a, b) => az(a.tickers[0], b.tickers[0]) || timeDesc(a, b));
+  else rows.sort((a, b) => focusFirst(a, b) || moveDesc(a, b) || az(a.tickers[0], b.tickers[0]) || timeDesc(a, b));
+  let entries;
+  if (cfg.group) {
+    const order = [], grp = {};
+    rows.forEach((r) => r.tickers.forEach((t) => {
+      if (!grp[t]) { grp[t] = []; order.push(t); }
+      grp[t].push(r);
+    }));
+    entries = [];
+    order.forEach((t) => {
+      const g = grp[t].slice().sort(timeDesc);
+      entries.push({ kind: "head", tk: t, move: newsMoveOf(d, t), n: g.length });
+      g.forEach((r) => entries.push({ kind: "story", row: r, tags: r.tickers.filter((x) => x !== t) }));
+    });
+  } else entries = rows.map((r) => ({ kind: "story", row: r, tags: r.tickers }));
+  const inScope = (list) => (n && isFin(n.keep) && Array.isArray(list) ? list.filter((t) => typeof t === "string" && live.indexOf(t) >= 0).sort(az) : []);
+  const tks = {};
+  rows.forEach((r) => r.tickers.forEach((t) => { tks[t] = true; }));
+  return { rows: rows, entries: entries, pending: inScope(n && n.pending), failed: inScope(n && n.failed),
+    counts: { stories: rows.length, tickers: Object.keys(tks).length },
+    updated: n && isFin(n.fetchedAt) ? n.fetchedAt : null, capped: !!(n && isFin(n.keep) && n.keep < cfg.per),
+    scopeEmpty: scopeEmpty, allMuted: scope.length > 0 && !live.length, planned: live.length,
+    spanHid: nItems > 0 && nSpan === 0, qHid: nSpan > 0 && nQ === 0, busy: !!(nw && nw.busy) };
+};
+// pages of `per` entries; a heading that would fill a page's last slot moves on with its stories
+const pageEntries = (entries, per) => {
+  const pages = [];
+  let cur = [];
+  entries.forEach((e) => {
+    if (cur.length >= per || (e.kind === "head" && per > 1 && cur.length === per - 1)) { pages.push(cur); cur = []; }
+    cur.push(e);
+  });
+  if (cur.length || !pages.length) pages.push(cur);
+  return pages;
+};
+const newsRowCss = css`
+  & .pw-mute { visibility: hidden; color: ${C.dim}; cursor: pointer; margin-left: 3px; }
+  &:hover .pw-mute { visibility: visible; }
+  & .pw-mute:hover { color: ${C.ink}; }
+`;
+const newsTagCss = css`
+  cursor: pointer;
+  &:hover { color: ${C.ink}; text-decoration: underline; }
+`;
+const newsChipCss = css`
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 8px; color: ${C.dim}; cursor: pointer; padding: 0 3px; border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06); white-space: nowrap;
+  &:hover { color: ${C.ink}; }
+`;
+
 // bell after a ticker that has price alerts (amber once one has fired)
 const Bell = ({ rules }) => (!rules || !rules.length ? null : (
   <span title={"price alerts:\n" + rules.map(ruleLine).join("\n")}
@@ -4402,6 +4599,7 @@ const fromTemplate = (t) => {
   const w = { title: t.key === "full" ? undefined : t.label, w: t.w, h: t.h };
   if (Array.isArray(t.items)) w.items = t.items.slice();
   if (t.compact) w.compact = true;
+  if (t.newsCfg) w.news = Object.assign({}, t.newsCfg);
   Object.keys(w).forEach((k) => { if (w[k] === undefined) delete w[k]; });
   return w;
 };
@@ -4553,7 +4751,7 @@ const editorNode = (state, dispatch, d, L, has) => {
             dispatch({ type: "EDIT_CONFIRM", what: null });
             addWindow(base, dw, fromTemplate(t), dispatch);
             if (t.news && !newsOn(state)) savePref("news", true, dispatch);
-          }, t.news ? "headlines, price alerts and alerts (turns headlines on)" : undefined, "tpl:" + t.key))}
+          }, t.tip, "tpl:" + t.key))}
         </div>
       ) : null}
       {confirm === "delete" && base.windows.length > 1 ? (
@@ -4687,11 +4885,74 @@ const editorNode = (state, dispatch, d, L, has) => {
       </div>
     );
   };
+  // ---- the news page's options (13.1, windows[i].news): chips per field,
+  // saved at once; the first click creates `news: {}` (the new path)
+  const newsEditorNode = () => {
+    const raw = dw.news && typeof dw.news === "object" && !Array.isArray(dw.news) ? normNews(dw.news) : null;
+    const cfg = Object.assign({}, NEWS_DEF, raw);
+    const setNews = (patch) => setWin({ news: normNews(Object.assign({}, cfg, patch)) || {} });
+    const pad = (depthOf("panel.news") + 1) * 10;
+    const row = (label, body, key) => (
+      <div key={"news:" + key} className={edLine} style={{ width: "100%", boxSizing: "border-box", paddingLeft: pad }}>
+        <span style={edDim}>{label}</span>{body}
+      </div>
+    );
+    const pick = (label, field, v, tip) => chip(label, cfg[field] === v, () => { const p = {}; p[field] = v; setNews(p); }, tip, field + ":" + v);
+    const flag = (label, field, tip) => chip(label, cfg[field] === true, () => { const p = {}; p[field] = !cfg[field]; setNews(p); }, tip, "flag:" + field);
+    const failed = d.news && Array.isArray(d.news.failed) ? d.news.failed : [];
+    const commitPick = (ev) => {
+      const words = String(ev.target.value || "").split(/[\s,]+/).filter((x) => x);
+      const ok = newsList(words) || [], bad = words.filter((x) => !NEWS_TICKER_RE.test(x.toUpperCase()));
+      if (ok.join(" ") !== cfg.tickers.join(" ")) setNews({ tickers: ok });
+      ev.target.value = ok.join(" ");
+      if (bad.length) {
+        dispatch({ type: "NEWS_PICK_MSG", msg: "not a ticker: " + bad.join(", ") });
+        setTimeout(() => dispatch({ type: "NEWS_PICK_MSG", msg: null }), 5000);
+      }
+    };
+    const full = cfg.tickers.length >= NEWS_LIST_MAX;
+    return (
+      <div key="news:opts" data-pw-feature="panel.news" style={{ width: "100%", boxSizing: "border-box" }}>
+        {row("whose", [
+          pick("movers", "scope", "movers", "holdings moving > 3 % today (as before 13.1)"),
+          pick("holdings", "scope", "holdings", "every held stock"),
+          pick("watchlist", "scope", "watch", "the watchlist"),
+          pick("both", "scope", "all", "holdings and the watchlist"),
+          pick("pick…", "scope", "pick", "tickers you type (held or not)"),
+        ], "scope")}
+        {cfg.scope === "pick" ? row("tickers", [
+          <input key={"pick:" + cfg.tickers.join(" ")} className={inputCss} disabled={full}
+            style={{ flex: "1 1 120px", minWidth: 0, fontSize: 9, padding: "1px 4px", opacity: full ? 0.6 : 1 }}
+            defaultValue={full ? "" : cfg.tickers.join(" ")} placeholder={full ? NEWS_LIST_MAX + " picked (the most)" : "KO MSFT SHOP.TO"}
+            title="tickers to follow here (Enter or click away keeps them, Esc reverts)"
+            onKeyDown={(ev) => {
+              if (isEnter(ev)) commitPick(ev);
+              else if (isEscape(ev)) { ev.stopPropagation(); ev.target.value = cfg.tickers.join(" "); ev.target.blur(); }
+            }} onBlur={commitPick} />,
+          state.newsPickMsg ? <span key="bad" style={{ color: C.amber, whiteSpace: "nowrap" }}>{state.newsPickMsg}</span> : null,
+        ], "pick") : null}
+        {cfg.scope === "pick" && cfg.tickers.length ? row("picked", cfg.tickers.map((t) => chip(t + (failed.indexOf(t) >= 0 ? " ?" : "") + " ×", false,
+          () => setNews({ tickers: cfg.tickers.filter((x) => x !== t) }),
+          failed.indexOf(t) >= 0 ? t + ": headlines unavailable (Yahoo) — click to remove" : "click to remove " + t, "pk:" + t)), "picked") : null}
+        {row("per stock", [1, 3, 5, 10].map((n) => pick(String(n), "per", n, "headlines kept per ticker (Yahoo gives ~10)")), "per")}
+        {row("order", [pick("newest", "sort", "new", "newest first"), pick("movers", "sort", "move", "the biggest movers first (the stock open here first)"),
+          pick("A–Z", "sort", "ticker", "by ticker")], "sort")}
+        {row("since", [pick("today", "span", "day", "the last 24 hours"), pick("3 days", "span", "3d", "the last 3 days"),
+          pick("week", "span", "week", "the last 7 days"), pick("all", "span", "all", "any time")], "span")}
+        {row("layout", [flag("dense", "dense", "one line per story"), flag("group by ticker", "group", "a heading per ticker"),
+          flag("source", "sources", "show the source and the time")], "layout")}
+        {cfg.mute.length ? row("muted", cfg.mute.map((t) => chip(t + " ×", false, () => setNews({ mute: cfg.mute.filter((x) => x !== t) }), "show " + t + " again", "mu:" + t))
+          .concat([chip("unmute all", false, () => setNews({ mute: [] }), "show every ticker again", "mu:all")]), "mute") : null}
+        {cfg.q ? row("keyword", [chip("keyword: " + cfg.q + " ×", false, () => setNews({ q: "" }), "the saved filter (typed in the panel's filter box) — click to clear", "q")], "q") : null}
+      </div>
+    );
+  };
   const featureBody = (key) => () => {
     const out = [];
     FEATURES.forEach((f) => {
       if (editGroupOf(f.id) !== key || /^graph\.(range|mode)\./.test(f.id)) return;
       out.push(featureRow(f));
+      if (f.id === "panel.news" && set["panel.news"] === true) out.push(newsEditorNode());
       if (f.id === "graph.tabs") out.push(chipRow("ranges", FEATURES.filter((g) => g.parent === "graph.tabs" && /^graph\.range\./.test(g.id)).map((g) => g.id), 2));
       if (f.id === "graph.modes") out.push(chipRow("modes", ["graph.mode.value", "graph.mode.pl", "graph.mode.sectors"], 3));
     });
@@ -5166,7 +5427,13 @@ const renderWin = (state, dispatch) => {
   const win = G.win;
   const K = LAYOUT_K;
   // the news panel (12.12): the stock open here, then news.top (no work while it is off)
-  const feed = enabled(win, "panel.news") && newsOn(state) ? newsFeedOf(d, state) : { rows: [], busy: false };
+  const newsCfg = enabled(win, "panel.news") ? newsCfgOf(win) : null;   // 13.1: the news page's options (null = the 13.0 panel)
+  const newsQ = newsCfg ? newsQueryOf(state, newsCfg) : "";
+  const feed = enabled(win, "panel.news") && newsOn(state) ? (newsCfg ? newsPageFeed(d, state, newsCfg) : newsFeedOf(d, state))
+    : { rows: [], entries: [], busy: false };
+  const newsEntries = newsCfg ? feed.entries || [] : feed.rows;   // the news page counts headings + stories as its rows
+  const newsRowH = newsCfg && newsCfg.dense ? K.ROW_NEWS_DENSE : K.ROW_NEWS;
+  const newsFilterOn = (w) => !!newsCfg && (w >= 240 || !!newsQ || !!newsCfg.q);   // an active filter is never hidden
   const tw = (text, px) => String(text).length * K.MONO * px;
   const salesN = Array.isArray(d.sales) ? d.sales.filter((s) => s && typeof s.ticker === "string").length : 0;
   const rulesN = alertRulesOf(d).length;
@@ -5219,8 +5486,12 @@ const renderWin = (state, dispatch) => {
     "panel.priceAlerts": () => EYE + Math.min(rulesN, state.alertsExpanded ? rulesN : ALERT_ROWS) * K.RULE_ROW +
       (rulesN > ALERT_ROWS ? K.MORE : 0) + (state.alertMsg && !state.focusTicker ? K.RISK_ROW : 0),
     "panel.alerts": () => EYE + alerts.length * (K.ROW_ALERT + 1),
-    "panel.news": (w, R) => EYE + (feed.rows.length ? Math.min(R.news, feed.rows.length) * K.ROW_NEWS +
-      (R.news < feed.rows.length ? K.PAGER : 0) : K.RISK_ROW + 3),
+    "panel.news": (w, R) => {
+      if (!newsCfg) return EYE + (feed.rows.length ? Math.min(R.news, feed.rows.length) * K.ROW_NEWS + (R.news < feed.rows.length ? K.PAGER : 0) : K.RISK_ROW + 3);
+      const pgs = pageEntries(newsEntries, Math.max(1, R.news)), p0 = pgs[0];
+      const body = p0.length ? p0.reduce((h, e) => h + (e.kind === "head" ? K.ROW_NEWS_GROUP : newsRowH), 0) : K.RISK_ROW + 3;
+      return EYE + (newsFilterOn(w) && newsOn(state) ? K.NEWS_FILTER : 0) + body + (pgs.length > 1 ? K.PAGER : 0) + K.NEWS_STATUS;
+    },
   };
   const headLines = [
     [{ id: "header.value", w: tw(money(totals.value), 22) },
@@ -5245,7 +5516,7 @@ const renderWin = (state, dispatch) => {
   const L = layoutFor(win, {
     Wu: G.Wu, Hu: G.Hu, on: on, order: itemsOf(win), est: est, head: headLines, tabs: tabWs,
     lists: { holdings: holdList ? listRows.length : null, earnings: calendar.length || null,
-      days: dayRows.length || null, news: feed.rows.length || null, map: !focus && !empty && state.view === "map" },
+      days: dayRows.length || null, news: newsEntries.length || null, map: !focus && !empty && state.view === "map" },
     big: bigOn, sector: sectorMode, facets: sectorFacets, focusSector: !!focusName,
     focusList: focusName && focusName !== "portfolio" ? 5 + 2 * K.RISK_ROW : 0,
     readoutOwnLine: readoutOwnLine, notesForced: !!state.dayMsg || sectorMode, benchLine: benchAny, lateLine: lateAny,
@@ -5807,6 +6078,7 @@ const renderWin = (state, dispatch) => {
   // paged by the rows the layout gives it (per-window newsPage); a click opens
   // the story (https only); with headlines off: "turn on" (_settings.news)
   const newsNode = (first, attrs) => {
+    if (newsCfg) return newsPageNode(first, attrs);
     const rowsN = Math.max(1, L.rows.news || 1), all = feed.rows;
     const nPages = Math.max(1, Math.ceil(all.length / rowsN));
     const pg = Math.min(state.newsPage || 0, nPages - 1);
@@ -5846,6 +6118,159 @@ const renderWin = (state, dispatch) => {
               onClick={() => dispatch({ type: "SET_NEWS_PAGE", page: pg + 1 })}>more ›</span>
           </div>
         ) : null}
+      </div>
+    );
+  };
+  // the news page (13.1): the window's `news` options — scope, per-ticker
+  // cap, sort, span, group, dense, sources, mute and the keyword (the filter
+  // box; Enter keeps it as cfg.q, Esc clears it). Tags open the stock (with a
+  // holdings panel here) or narrow the feed; × on hover mutes a ticker here.
+  const newsPageNode = (first, attrs) => {
+    const cfg = newsCfg;
+    const msg = css`${mono} font-size:8.5px; color:${C.dim}; margin-top:3px;`;
+    const dimMono = css`${mono} font-size:8px; color:${C.dim};`;
+    const setNews = (patch) => changeWin(state, win.id, { news: normNews(Object.assign({}, cfg, patch)) || {} }, dispatch);
+    const setQuery = (v, from) => dispatch({ type: "SET_NEWS_QUERY", value: v, from: from });
+    const clearQ = () => { setQuery("", ""); if (cfg.q) setNews({ q: "" }); };
+    const openEditor = (ev) => {
+      if (!state.editOpen) { bodyToTop(ev); dispatch({ type: "TOGGLE_EDITOR", group: "panels" }); }
+      else if (state.editGroup !== "panels") dispatch({ type: "EDIT_GROUP", group: "panels" });
+      const root = ev && ev.currentTarget && ev.currentTarget.closest ? ev.currentTarget.closest("[data-pw-win]") : null;
+      setTimeout(() => {
+        try {
+          const el = root ? root.querySelector('[data-pw-feature="panel.news"]') : null;
+          if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+        } catch (e) { /* no DOM: fine */ }
+      }, 80);
+    };
+    const canOpen = enabled(win, "panel.holdings");
+    const tagClick = (tk) => (ev) => {
+      ev.stopPropagation();
+      if (!TICKER_RE.test(tk)) return;
+      if (canOpen) openStock(tk, dispatch, state); else setQuery(tk, cfg.q);
+    };
+    const tagTip = (tk) => (canOpen ? "open " + tk : "only " + tk + "'s headlines");
+    const tag = (tk, key, style) => <span key={key} className={newsTagCss} style={style} title={tagTip(tk)} onClick={tagClick(tk)}>{tk}</span>;
+    const muteX = (tk, key) => (cfg.mute.length >= NEWS_LIST_MAX || !TICKER_RE.test(tk) ? null
+      : <span key={key} className="pw-mute" title={"hide " + tk + " here"}
+          onClick={(ev) => { ev.stopPropagation(); setNews({ mute: cfg.mute.concat([tk]) }); }}>×</span>);
+    const link = (txt, tip, fn) => <span className={linkBtn} style={{ fontSize: 8.5 }} title={tip} onClick={fn}>{txt}</span>;
+    const agoShort = (t) => agoText(t).replace(" ago", "");
+    const storyNode = (e, key) => {
+      const r = e.row, cmd = openCmd(r.url);
+      const tip = r.title + (r.source ? "\n" + r.source : "") + (isFin(r.time) ? " · " + agoText(r.time) : "") + (cmd ? "\nclick to open " + r.url : "");
+      const open = () => { if (cmd) run(cmd).catch(() => {}); };
+      if (cfg.dense) {
+        return (
+          <div key={key} className={newsRowCss} title={tip} onClick={open}
+            style={{ display: "flex", alignItems: "baseline", marginTop: 2, lineHeight: 1.25, minWidth: 0, cursor: cmd ? "pointer" : "default" }}>
+            <span style={Object.assign({ fontSize: 9.5, color: C.ink, flex: "1 1 auto" }, CUT)}>{r.title}</span>
+            <span className={dimMono} style={{ whiteSpace: "nowrap", flex: "none" }}>
+              {e.tags.slice(0, NEWS_DENSE_TAGS).map((t) => <span key={t}>{" · "}{tag(t, "t")}{muteX(t, "m")}</span>)}
+              {e.tags.length > NEWS_DENSE_TAGS ? " +" + (e.tags.length - NEWS_DENSE_TAGS) : ""}
+              {cfg.sources && isFin(r.time) ? " · " + agoShort(r.time) : ""}
+            </span>
+          </div>
+        );
+      }
+      const meta = [];
+      e.tags.forEach((t, i) => { if (i) meta.push(" · "); meta.push(tag(t, "t" + t)); meta.push(muteX(t, "m" + t)); });
+      const rest = (cfg.sources ? [r.source || null, agoText(r.time) || null] : []).filter((x) => x).join(" · ");
+      if (rest) meta.push((meta.length ? " · " : "") + rest);
+      return (
+        <div key={key} className={newsRowCss} style={{ marginTop: 3, lineHeight: 1.25, minWidth: 0 }}>
+          <div style={Object.assign({ fontSize: 9.5, cursor: cmd ? "pointer" : "default", color: C.ink }, CUT)} title={tip} onClick={open}>{r.title}</div>
+          <div className={dimMono} style={CUT}>{meta}</div>
+        </div>
+      );
+    };
+    const headNode = (e, key) => (
+      <div key={key} className={dimMono} style={Object.assign({ marginTop: 4, fontSize: 8.5 }, CUT)}
+        title={e.n + (e.n === 1 ? " story" : " stories") + (isFin(e.move) ? " · today " + pct(e.move) : "")}>
+        {tag(e.tk, "t", { color: C.ink })}
+        {(isFin(e.move) ? " · " + pct(e.move) : "") + " · " + e.n}
+      </div>
+    );
+    const rowsN = Math.max(1, L.rows.news || 1);
+    const pages = pageEntries(feed.entries || [], rowsN), nPages = pages.length;
+    const pg = Math.min(state.newsPage || 0, nPages - 1);
+    const shown = pages[pg];
+    const storiesBefore = pages.slice(0, pg).reduce((n, p) => n + p.filter((e) => e.kind === "story").length, 0);
+    const storiesHere = shown.filter((e) => e.kind === "story").length;
+    const ci = L.cols.findIndex((c) => c.some((u) => u.ids.indexOf("panel.news") >= 0));
+    const colW = ci >= 0 ? L.colW[ci] : L.CW;
+    const filterOn = newsFilterOn(colW);
+    const scopeWord = cfg.scope === "pick" ? cfg.tickers.length + " picked" : NEWS_SCOPE_TEXT[cfg.scope];
+    const nStories = feed.counts ? feed.counts.stories : 0;
+    const nPlaced = cfg.group ? (feed.entries || []).filter((e) => e.kind === "story").length : nStories;
+    const eye = "news · " + scopeWord + " · " + nStories + (nStories === 1 ? " story" : " stories") + (feed.capped ? " · capped" : "") +
+      (feed.updated ? " · updated " + agoText(feed.updated) : "");
+    const eyeTip = "news · " + cfg.scope + " · " + NEWS_SORT_TIP[cfg.sort] + " · " + cfg.per + " per stock · " + NEWS_SPAN_TIP[cfg.span] +
+      (cfg.mute.length ? " · " + cfg.mute.length + " muted" : "") + (newsQ ? " · filter '" + newsQ + "'" : "") +
+      (feed.capped ? "\ncapped: the tracker keeps " + d.news.keep + " per stock (its largest window's setting, at most 300 stories)" : "");
+    const lim = d.news && isFin(d.news.movePct) ? d.news.movePct : NEWS_MOVE_PCT;
+    const toWatch = (ev) => {
+      if (!canOpen) return openEditor(ev);
+      if (state.focusTicker) dispatch({ type: "SET_STOCK", ticker: null });
+      dispatch({ type: "SET_VIEW", view: "watch" });
+    };
+    let empty = null;
+    if (!newsOn(state)) {
+      empty = <div className={msg}>headlines off · {link("turn on", "show the latest headlines (_settings.news)", () => { savePref("news", true, dispatch); })}</div>;
+    } else if (!shown.length) {
+      if (cfg.scope === "pick" && feed.scopeEmpty) empty = <div className={msg}>{link("pick tickers in ⚙", "news page settings", openEditor)}</div>;
+      else if (cfg.scope === "watch" && feed.scopeEmpty) empty = <div className={msg}>nothing on the watchlist · {link("add stocks with watch", canOpen ? "the holdings panel's watch view" : "news page settings", toWatch)}</div>;
+      else if (cfg.scope === "movers" && feed.scopeEmpty) empty = <div className={msg}>{"no holding moved over " + lim + "% today · "}{link("show every holding", "headlines for every holding", () => setNews({ scope: "all" }))}</div>;
+      // a typed keyword that matches nothing says so first (the fetch note
+      // follows), so the user isn't told to wait for a word that isn't there
+      else if (feed.qHid) empty = <div className={msg}>{"nothing matches '" + newsQ + "' · "}{link("clear", "clear the filter", clearQ)}
+        {feed.pending.length ? " · " + feed.pending.length + " still fetching" : ""}</div>;
+      else if (feed.pending.length) empty = <div className={msg}>{"fetching headlines… " + (feed.planned - feed.pending.length) + " of " + feed.planned + " tickers · next refresh in ~5 min · "}{link("⚙", "news page settings", openEditor)}</div>;
+      else if (feed.allMuted) empty = <div className={msg}>everything is muted · <span className={newsChipCss} title="unmute all" onClick={() => setNews({ mute: [] })}>{cfg.mute.length + " muted ×"}</span></div>;
+      else if (feed.spanHid) empty = <div className={msg}>{"no headlines " + NEWS_SPAN_TEXT[cfg.span] + " · "}{cfg.span === "week"
+        ? link("show all", "headlines from any time", () => setNews({ span: "all" })) : link("widen to a week", "the last 7 days", () => setNews({ span: "week" }))}</div>;
+      else if (feed.busy) empty = <div className={msg}>loading headlines…</div>;
+      else empty = <div className={msg}>no headlines yet · {link("⚙", "news page settings", openEditor)}</div>;
+    }
+    const status = [];
+    if (newsOn(state)) {
+      if (feed.updated) status.push(<span key="u" title="when the tracker last fetched headlines">{"updated " + agoText(feed.updated)}</span>);
+      if (feed.pending.length) status.push(<span key="p" title={"not fetched yet: " + feed.pending.join(" ")}>{"fetching " + feed.pending.length + " more…"}</span>);
+      if (feed.failed.length) status.push(<span key="f" style={{ color: C.amber }} title={feed.failed.map((t) => t + ": headlines unavailable (Yahoo)").join("\n")}>{feed.failed.length + " unavailable"}</span>);
+      if (newsQ) status.push(<span key="q" className={newsChipCss} title="clear the filter" onClick={clearQ}>{"filter: " + newsQ + " ×"}</span>);
+      if (cfg.mute.length) status.push(<span key="m" className={newsChipCss} title={"muted here: " + cfg.mute.join(" ") + " — click to unmute all"} onClick={() => setNews({ mute: [] })}>{cfg.mute.length + " muted ×"}</span>);
+      if (cfg.span !== "all") status.push(<span key="s" className={newsChipCss} title="show headlines from any time" onClick={() => setNews({ span: "all" })}>{NEWS_SPAN_CHIP[cfg.span] + " ×"}</span>);
+    }
+    return (
+      <div className={first ? "" : sectionGap} {...attrs}>
+        <div style={{ display: "flex", alignItems: "baseline", minWidth: 0 }}>
+          <span className={eyebrow} style={CUT} title={eyeTip}>{eye}</span>
+          <span className={newsChipCss} style={{ marginLeft: 5, flex: "none" }} title="news page settings" onClick={openEditor}>⚙</span>
+        </div>
+        {filterOn && newsOn(state) ? (
+          <input className={inputCss} value={newsQ} placeholder="filter…" maxLength={NEWS_Q_MAX}
+            style={{ width: "100%", boxSizing: "border-box", fontSize: 9, padding: "1px 4px", height: K.NEWS_FILTER - 4, marginTop: 2, display: "block" }}
+            title="filter the headlines by a word (Enter keeps it for this window, Esc clears it)"
+            onChange={(ev) => setQuery(ev.target.value, cfg.q)}
+            onKeyDown={(ev) => {
+              if (isEnter(ev)) { const v = ev.target.value; if (newsQOk(v)) { setNews({ q: v }); setQuery(v, v); } }
+              else if (isEscape(ev)) { ev.stopPropagation(); clearQ(); }
+            }} />
+        ) : null}
+        {empty}
+        {!empty ? shown.map((e, i) => (e.kind === "head" ? headNode(e, pg + ":" + i) : storyNode(e, pg + ":" + i))) : null}
+        {nPages > 1 ? (
+          <div className={rowFlex} style={{ marginTop: 5 }}>
+            <span className={linkBtn} style={{ fontSize: 8, visibility: pg > 0 ? "visible" : "hidden" }}
+              onClick={() => dispatch({ type: "SET_NEWS_PAGE", page: pg - 1 })}>‹ back</span>
+            <span className={dimMono}>{(storiesBefore + 1) + "–" + (storiesBefore + storiesHere) + " of " + nPlaced}</span>
+            <span className={linkBtn} style={{ fontSize: 8, visibility: pg < nPages - 1 ? "visible" : "hidden" }}
+              onClick={() => dispatch({ type: "SET_NEWS_PAGE", page: pg + 1 })}>more ›</span>
+          </div>
+        ) : null}
+        <div className={dimMono} style={{ marginTop: 3, height: K.NEWS_STATUS - 3, lineHeight: "8px", display: "flex", alignItems: "baseline", columnGap: 5, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+          {status.map((x, i) => (i ? [<span key={"sep" + i}>·</span>, x] : x))}
+        </div>
       </div>
     );
   };

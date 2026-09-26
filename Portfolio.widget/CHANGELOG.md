@@ -1,5 +1,47 @@
 # Changelog
 
+## 13.1
+
+- **News page**: a window (or the news panel in any window) that shows
+  headlines for every holding, the watchlist, both, or tickers you type —
+  not only today's movers. **⚙ → + new window → news page** adds one; or
+  open the news panel's options under it in any window's ⚙ editor: **whose**
+  (movers · holdings · watchlist · both · pick…), **per stock** (1–10),
+  **order** (newest · movers · A–Z), **since** (today · 3 days · week ·
+  all), **layout** (dense one-line rows, group by ticker, source). Saved per
+  window as `display.windows[i].news`; a window without it shows the news
+  panel exactly as in 13.0.
+- **Filter, mute and tags inside the panel**: a filter box narrows the feed
+  as you type (Enter saves the keyword, Esc clears it); × on a ticker tag
+  hides that ticker in this window; clicking a tag opens the stock's detail
+  (when the window has a holdings panel) or narrows the feed to it; a story
+  about several of your tickers is shown once. The line under the rows says
+  when headlines were last fetched, "fetching N more…", "N unavailable", and
+  clears an active filter, mute list or span with one click. Every empty
+  state says why and what to click.
+- **Headline requests stay bounded**: one request per symbol per 30 minutes,
+  at most 12 per refresh and 4 at a time, spread between the price requests
+  instead of a burst; if the first 3 fail the rest wait for the next refresh;
+  a symbol with no headlines is retried after 10 minutes, then every 30. A
+  news page for 60 holdings fills over ~25 minutes; more than 72 symbols in
+  scope never fully fill (the README says so). Changing an option costs no
+  request, except a new scope or a newly picked ticker (at most one refresh
+  per minute). "Too Many Requests" from the headline API is logged like a
+  price rate limit.
+- **Privacy note**: with a news page Yahoo sees every symbol in the page's
+  scope, not only the movers (README, Privacy).
+- Downgrade caveat: 13.0's widget or `set_setting.py` drops the `news`
+  options from every window when it rewrites `display` — the panel then
+  shows the movers again; nothing else is lost.
+- From the review: the saved keyword rejects invisible characters (control,
+  format, surrogate, private-use and line/paragraph separators, including
+  ones outside the basic plane) instead of saving them.
+- A keyword that matches nothing says "nothing matches 'x'" (with "N still
+  fetching" while headlines are on their way) instead of "fetching
+  headlines…".
+- Graph axis labels above $100k use one decimal ("$298.4k", not "$298.40k"),
+  which no longer runs into the graph's left edge.
+
 ## 13.0
 
 The first public release: everything from 12.5–12.12 (history for any

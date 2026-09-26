@@ -15,9 +15,19 @@ digits, starting with a letter, unique), title (1-40 characters), x and y
 (screen pixels of the top-left, both or neither), w (300-1400 px), h
 ("auto" or 160-2000 px), zoom (0.6-1.6), items (the features shown, in
 order), prio ({feature: "always" | "normal" | "room"}), side ({panel: "a" |
-"b"}), carousel ("rotate" | "stack"), compact and graphBig (true / false).
-Unknown fields are dropped; unknown feature ids are kept (a newer or older
-widget may know them).
+"b"}), carousel ("rotate" | "stack"), compact and graphBig (true / false), news
+(the news page's options, 13.1 — see below). Unknown fields are dropped;
+unknown feature ids are kept (a newer or older widget may know them).
+
+news (an object, meaningful when the window shows panel.news; absent = the
+13.0 news panel, present — even {} — = the news page with these defaults):
+scope ("movers" | "holdings" | "watch" | "all" | "pick", default movers),
+tickers (the "pick" list, up to 40 symbols, upper-cased, deduped), per
+(headlines per ticker, 1-10, default 3), sort ("new" | "move" | "ticker",
+default move), span ("day" | "3d" | "week" | "all", default all), group,
+dense (default false), sources (default true), mute (up to 40 symbols
+hidden in this window), q (a saved keyword, up to 60 characters). Fields
+at their default are dropped inside `news`; the object itself is kept.
 
 parse_display(text)  -> (value, error): strict, for set_setting.py. value is
                         the cleaned object, None ("default": remove the key)
@@ -26,6 +36,10 @@ clean_display(obj)   -> the cleaned object or None: lenient, for the
                         tracker's data.json "ui" (a hand-edited file never
                         breaks the widget; bad parts are dropped / clamped).
 wants_news(obj)      -> True when a window shows the news panel.
+news_plan(obj)       -> None when no window shows the news panel, else
+                        {"scopes": sorted list, "tickers": sorted picks of
+                        the pick-scope windows, "per": max(3, largest per)}
+                        for the tracker's headline plan (13.1).
 """
 
 import json
@@ -54,8 +68,21 @@ PRIOS = ("always", "normal", "room")
 SIDES = ("a", "b")
 CAROUSELS = ("rotate", "stack")
 WIN_KEYS = ("id", "title", "x", "y", "w", "h", "zoom", "items", "prio", "side",
-            "carousel", "compact", "graphBig")
+            "carousel", "compact", "graphBig", "news")
 NEWS_PANEL = "panel.news"
+# the news page (13.1): windows[i].news
+NEWS_SCOPES = ("movers", "holdings", "watch", "all", "pick")
+NEWS_SORTS = ("new", "move", "ticker")
+NEWS_SPANS = ("day", "3d", "week", "all")
+NEWS_PER_RANGE = (1, 10)
+NEWS_LIST_MAX = 40
+NEWS_Q_MAX = 60
+# a Yahoo symbol: portfolio_file.TICKER_RE / portfolio_tracker.SYMBOL_RE
+NEWS_TICKER_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$")
+NEWS_DEFAULTS = (("scope", "movers"), ("tickers", []), ("per", 3), ("sort", "move"),
+                 ("span", "all"), ("group", False), ("dense", False), ("sources", True),
+                 ("mute", []), ("q", ""))
+NEWS_MIN_PER = 3                # the tracker keeps at least this many per ticker
 
 
 class _Reset(object):
@@ -110,6 +137,83 @@ def _title(v):
 
 def _no_constant(name):
     raise ValueError(name)
+
+
+def _news_q(v):
+    """the keyword as saved, or None when it isn't one (text of up to
+    NEWS_Q_MAX characters without control / format / line-separator code points)."""
+    if not isinstance(v, str) or len(v) > NEWS_Q_MAX:
+        return None
+    import unicodedata
+    if any(unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp") for c in v):
+        return None
+    return v
+
+
+def _news_tickers(v, strict):
+    """a ticker list: upper-cased, deduped, order kept, up to NEWS_LIST_MAX;
+    strict -> None on any bad entry, lenient -> bad entries dropped."""
+    if not isinstance(v, list) or (strict and len(v) > NEWS_LIST_MAX):
+        return None
+    out = []
+    for x in v:
+        t = x.upper() if isinstance(x, str) else None
+        if t is None or not NEWS_TICKER_RE.match(t) or len(t) > 21:
+            if strict:
+                return None
+            continue
+        if t not in out:
+            if len(out) >= NEWS_LIST_MAX:
+                if strict:
+                    return None
+                break
+            out.append(t)
+    return out
+
+
+def _news_clean(v, strict, p=""):
+    """windows[i].news -> the cleaned object (default-valued fields dropped,
+    the object kept even when empty). strict: _Bad on a bad field;
+    lenient: bad fields dropped, None for a non-object."""
+    if not isinstance(v, dict):
+        if strict:
+            raise _Bad("%s.news must be an object" % p)
+        return None
+    out = {}
+    for key, default in NEWS_DEFAULTS:
+        if key not in v:
+            continue
+        x = v[key]
+        if key == "scope":
+            good = x in NEWS_SCOPES
+            msg = "one of movers, holdings, watch, all, pick"
+        elif key in ("tickers", "mute"):
+            x = _news_tickers(x, strict)
+            good = x is not None
+            msg = "a list of up to 40 tickers"
+        elif key == "per":
+            good = _is_int(x) and NEWS_PER_RANGE[0] <= x <= NEWS_PER_RANGE[1]
+            msg = "a whole number from 1 to 10"
+        elif key == "sort":
+            good = x in NEWS_SORTS
+            msg = "one of new, move, ticker"
+        elif key == "span":
+            good = x in NEWS_SPANS
+            msg = "one of day, 3d, week, all"
+        elif key == "q":
+            x = _news_q(x)
+            good = x is not None
+            msg = "text of up to 60 characters"
+        else:                       # group, dense, sources
+            good = isinstance(x, bool)
+            msg = "true or false"
+        if not good:
+            if strict:
+                raise _Bad("%s.news.%s must be %s" % (p, key, msg))
+            continue
+        if x != default:
+            out[key] = x
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +287,8 @@ def _strict_window(i, w, seen):
             if not isinstance(w[k], bool):
                 raise _Bad("%s.%s must be true or false" % (p, k))
             out[k] = w[k]
+    if "news" in w:
+        out["news"] = _news_clean(w["news"], True, p)
     return out
 
 
@@ -264,6 +370,10 @@ def _lenient_window(w, seen):
     for k in ("compact", "graphBig"):
         if isinstance(w.get(k), bool):
             out[k] = w[k]
+    if "news" in w:
+        n = _news_clean(w["news"], False)
+        if n is not None:
+            out["news"] = n
     return out
 
 
@@ -290,3 +400,26 @@ def wants_news(obj):
     """True when some window of the (cleaned) display shows the news panel."""
     d = clean_display(obj)
     return bool(d) and any(NEWS_PANEL in w.get("items", ()) for w in d["windows"])
+
+
+def news_plan(obj):
+    """The tracker's headline plan from the (cleaned) display: None when no
+    window shows the news panel, else {"scopes": sorted scopes of those
+    windows (a window without `news` = "movers"), "tickers": sorted picks
+    of the pick-scope windows, "per": max(3, the largest per)}."""
+    d = clean_display(obj)
+    if not d:
+        return None
+    scopes, picks, per = set(), set(), NEWS_MIN_PER
+    for w in d["windows"]:
+        if NEWS_PANEL not in w.get("items", ()):
+            continue
+        cfg = w.get("news") or {}
+        scope = cfg.get("scope", "movers")
+        scopes.add(scope)
+        if scope == "pick":
+            picks.update(cfg.get("tickers", ()))
+        per = max(per, cfg.get("per", 3))
+    if not scopes:
+        return None
+    return {"scopes": sorted(scopes), "tickers": sorted(picks), "per": int(per)}

@@ -176,14 +176,25 @@ PRICE_ALERT_KINDS = ("above", "below", "pctFromCost", "drawdownPct")
 MAX_ALERTS = 50
 
 # headlines (_settings.news, .cache/news.json): the stock being viewed
-# (ticker_lookup.py news) and holdings moving more than NEWS_MOVE_PCT today
+# (ticker_lookup.py news), holdings moving more than NEWS_MOVE_PCT today and,
+# with a news page (13.1, display_prefs.news_plan), every held / watched /
+# picked ticker its windows ask for — bounded: NEWS_MAX_PER_REFRESH
+# requests per refresh, NEWS_PARALLEL at a time, NEWS_PLAN_MAX planned
 NEWS_TTL = 1800                 # s: a ticker's headlines are reused this long,
-NEWS_FAIL_TTL = 600             # ... after a failed fetch this long
+NEWS_FAIL_TTL = 600             # ... after a failed fetch this long (the
+NEWS_FAIL_MAX = 2               # first NEWS_FAIL_MAX failures; then NEWS_TTL)
 NEWS_MOVE_PCT = 3.0             # |1D move| above this % (strict) -> headlines
 NEWS_MAX_MOVERS = 8             # at most this many movers per refresh
 NEWS_PANEL_TOP = 3              # with a news panel (12.12): also the biggest
                                 # movers of the day, whatever their size
-NEWS_KEEP = 3                   # headlines kept per ticker, newest first
+NEWS_KEEP_MAX = 10              # headlines kept per ticker in news.json,
+                                # newest first (Yahoo gives about 10)
+NEWS_KEEP_MIN = 3               # data.json holds at least this many per ticker
+NEWS_MAX_PER_REFRESH = 12       # news requests per refresh (the rest wait)
+NEWS_PARALLEL = 4               # news requests in flight at once
+NEWS_BREAK = 3                  # first N news jobs all failing -> skip the rest
+NEWS_PLAN_MAX = 100             # planned tickers beyond this are dropped
+NEWS_OUT_MAX = 300              # stories in data.json at most (per_out cap)
 NEWS_PRUNE = 86400              # news.json entries older than this are dropped
 # a headline link: https only, and only characters that are harmless inside
 # the widget's single-quoted `open '...'` (quote() encodes everything else)
@@ -1324,8 +1335,8 @@ def news_item(title, source, t, url):
 
 
 def parse_news(raw):
-    """Yahoo's news list -> up to NEWS_KEEP NewsItems {title, source, time,
-    url}, newest first. Takes yfinance 1.x items ({"content": {"title",
+    """Yahoo's news list -> up to NEWS_KEEP_MAX NewsItems {title, source,
+    time, url}, newest first. Takes yfinance 1.x items ({"content": {"title",
     "pubDate", "provider": {"displayName"}, "clickThroughUrl": {"url"},
     "canonicalUrl": {"url"}}}) and the older flat ones ({"title",
     "publisher", "link", "providerPublishTime"}); items without a title go."""
@@ -1347,7 +1358,7 @@ def parse_news(raw):
                                    or c.get("providerPublishTime")), url)
         if item:
             items.append((-(item["time"] or 0), n, item))
-    return [item for _, _, item in sorted(items, key=lambda x: x[:2])][:NEWS_KEEP]
+    return [item for _, _, item in sorted(items, key=lambda x: x[:2])][:NEWS_KEEP_MAX]
 
 
 def fetch_news(ticker, yf_module):
@@ -1379,15 +1390,28 @@ def news_entry_t(entry):
     return None if isinstance(t, bool) or not isinstance(t, (int, float)) else t
 
 
+def news_entry_fails(entry):
+    """consecutive failures an error entry carries (a 13.0 entry: 1)."""
+    if not isinstance(entry, dict) or not entry.get("error"):
+        return 0
+    n = entry.get("fails")
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
+
+
 def news_fresh(entry, now):
-    """A news.json entry young enough to reuse (NEWS_FAIL_TTL after a failure)."""
+    """A news.json entry young enough to reuse: NEWS_TTL, or NEWS_FAIL_TTL
+    after a failure (NEWS_TTL again once it failed more than NEWS_FAIL_MAX
+    times in a row — a dead symbol is not retried every 10 minutes)."""
     t = news_entry_t(entry)
     if t is None:
         return False
-    return 0 <= now - t < (NEWS_FAIL_TTL if entry.get("error") else NEWS_TTL)
+    ttl = NEWS_TTL
+    if entry.get("error") and news_entry_fails(entry) <= NEWS_FAIL_MAX:
+        ttl = NEWS_FAIL_TTL
+    return 0 <= now - t < ttl
 
 
-def news_entry_items(entry):
+def news_entry_items(entry, keep=NEWS_KEEP_MAX):
     raw = entry.get("items") if isinstance(entry, dict) else None
     out = []
     for it in raw if isinstance(raw, list) else ():
@@ -1395,20 +1419,44 @@ def news_entry_items(entry):
             item = news_item(it.get("title"), it.get("source"), it.get("time"), it.get("url"))
             if item:
                 out.append(item)
-    return out[:NEWS_KEEP]
+                if len(out) >= keep:
+                    break
+    return out
 
 
-def save_news_entry(cache_dir, ticker, entry, now):
-    """Merge one ticker into news.json: re-read right before writing (the
-    tracker and ticker_lookup.py share the file), drop entries older than
-    NEWS_PRUNE, write atomically. Best effort."""
+def news_fetch_entry(ticker, yf_module, prev, now):
+    """One fetch -> (the news.json entry {t, items, error[, fails]}, the
+    error text or None). `prev` = the ticker's old entry (its `fails`
+    count carries on while the failures are consecutive)."""
+    try:
+        return {"t": now, "items": fetch_news(ticker, yf_module), "error": False}, None
+    except Exception as e:
+        return ({"t": now, "items": [], "error": True, "fails": news_entry_fails(prev) + 1},
+                "%s %s" % (type(e).__name__, e))
+
+
+def save_news_entries(cache_dir, entries, now):
+    """Merge {ticker: entry} into news.json in one read-merge-replace: an
+    exclusive flock on news.json.lock (the tracker and ticker_lookup.py
+    share the file; best effort — a lock error is ignored and the write
+    still happens), re-read right before writing, entries older than
+    NEWS_PRUNE dropped, written atomically. Best effort."""
+    if not entries:
+        return
     path = news_cache_path(cache_dir)
     tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
     with _news_lock:
+        lock = None
         try:
             os.makedirs(cache_dir, exist_ok=True)
+            try:
+                import fcntl
+                lock = open(path + ".lock", "a")
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                lock = None
             cache = read_news_cache(cache_dir)
-            cache[ticker] = entry
+            cache.update(entries)
             cache = {k: v for k, v in cache.items()
                      if news_entry_t(v) is not None and now - news_entry_t(v) < NEWS_PRUNE}
             with open(tmp, "w") as f:
@@ -1419,22 +1467,31 @@ def save_news_entry(cache_dir, ticker, entry, now):
                 os.remove(tmp)
             except OSError:
                 pass
+        finally:
+            if lock is not None:
+                try:
+                    lock.close()     # releases the flock
+                except Exception:
+                    pass
+
+
+def save_news_entry(cache_dir, ticker, entry, now):
+    """Merge one ticker into news.json (save_news_entries)."""
+    save_news_entries(cache_dir, {ticker: entry}, now)
 
 
 def news_for(ticker, yf_module, cache_dir, now=None, cache=None):
     """(items, fetched-at epoch, from the cache?, failed?) for one ticker:
-    news.json's entry while it is fresh, else one fetch (saved either way).
-    `cache` = news.json as already read (the tracker reads it once)."""
+    news.json's entry while it is fresh, else one fetch (saved either way,
+    under the shared lock). Up to NEWS_KEEP_MAX items. `cache` = news.json
+    as already read."""
     now = now_epoch() if now is None else now
     entry = (read_news_cache(cache_dir) if cache is None else cache).get(ticker)
     if news_fresh(entry, now):
         return news_entry_items(entry), int(entry["t"]), True, bool(entry.get("error"))
-    try:
-        items, failed = fetch_news(ticker, yf_module), False
-    except Exception:
-        items, failed = [], True
-    save_news_entry(cache_dir, ticker, {"t": now, "items": items, "error": failed}, now)
-    return items, now, False, failed
+    entry, _ = news_fetch_entry(ticker, yf_module, entry, now)
+    save_news_entry(cache_dir, ticker, entry, now)
+    return entry["items"], now, False, bool(entry["error"])
 
 
 # --------------------------------------------------------------------------
@@ -3901,7 +3958,7 @@ def main(argv=None, yf_module=None):
         kind, tk = job
         try:
             if kind == "news":
-                news_got[tk] = news_for(tk, yf_module, cache_dir, news_now, news_cache)
+                news_fetch_job(tk)
                 return
             if kind == "divs":
                 # the sold slices' dates too: their payments still count
@@ -3920,15 +3977,22 @@ def main(argv=None, yf_module=None):
         meta.setdefault(tk, {})
     # headlines (_settings.news only; off = news.json is never read and no
     # news request is made): held movers of more than NEWS_MOVE_PCT today,
-    # biggest first; the ones not fetched in the last NEWS_TTL get a job in
-    # the same pool, first in line so it overlaps the meta work
-    # A window with the news panel (12.12) also wants the NEWS_PANEL_TOP
-    # biggest movers of the day, and news.top lists them in that order.
+    # biggest first. A window with the news panel (12.12) also wants the
+    # NEWS_PANEL_TOP biggest movers of the day, and news.top lists them in
+    # that order. A news page (13.1, display_prefs.news_plan) adds every
+    # held / watched / picked ticker its windows ask for. The plan is
+    # bounded (NEWS_PLAN_MAX); per refresh at most NEWS_MAX_PER_REFRESH of
+    # the not-fresh ones are fetched — movers first, then never-fetched
+    # (A-Z), then the oldest — NEWS_PARALLEL at a time, interleaved with the
+    # meta jobs, and the first NEWS_BREAK all failing skips the rest.
     news_on = settings.get("news") is True
-    news_panel = news_on and display_prefs.wants_news(settings.get("display"))
+    news_plan = display_prefs.news_plan(settings.get("display")) if news_on else None
+    news_panel = news_plan is not None       # == display_prefs.wants_news
     news_movers, news_cache, news_got, news_now = [], {}, {}, now_epoch()
+    news_planned, news_dropped, news_jobs = [], 0, []
+    news_state = {"ok": 0, "fail": 0, "skipped": 0, "broken": False, "rate": None}
+    news_sem, news_state_lock = threading.Semaphore(NEWS_PARALLEL), threading.Lock()
     if news_on:
-        news_cache = read_news_cache(cache_dir)
         for tk in tickers:
             r = results[tk]
             prev = r.get("prevClose") or r["price"]
@@ -3940,23 +4004,104 @@ def main(argv=None, yf_module=None):
             news_movers = [m for i, m in enumerate(news_movers)
                            if i < NEWS_PANEL_TOP or -m[0] > NEWS_MOVE_PCT]
         news_movers = [tk for _, tk in news_movers[:NEWS_MAX_MOVERS]]
+        # the plan: movers, then holdings, watch and picks as the windows ask
+        scopes = news_plan["scopes"] if news_plan else ()
+        wanted = list(news_movers)
+        if "holdings" in scopes or "all" in scopes:
+            wanted += tickers
+        if "watch" in scopes or "all" in scopes:
+            wanted += watch
+        if "pick" in scopes:
+            wanted += news_plan["tickers"]
+        for tk in wanted:               # a hand-edited file: symbols only
+            if isinstance(tk, str) and SYMBOL_RE.match(tk) and tk not in news_planned:
+                news_planned.append(tk)
+        news_dropped = max(0, len(news_planned) - NEWS_PLAN_MAX)
+        news_planned = news_planned[:NEWS_PLAN_MAX]
+        # right before dispatching: the file as it is now (ticker_lookup.py
+        # writes it too), then the fetch order
+        news_cache = read_news_cache(cache_dir)
+        stale = [tk for tk in news_planned if not news_fresh(news_cache.get(tk), news_now)]
+        first = [tk for tk in news_movers if tk in stale]
+        rest = [tk for tk in stale if tk not in first]
+        never = sorted(tk for tk in rest if news_entry_t(news_cache.get(tk)) is None)
+        oldest = sorted((tk for tk in rest if tk not in never),
+                        key=lambda tk: (news_entry_t(news_cache[tk]), tk))
+        news_jobs = (first + never + oldest)[:NEWS_MAX_PER_REFRESH]
+
+    def news_fetch_job(tk):
+        """one planned ticker: fetched unless the breaker tripped; the entry
+        goes to news_got (merged into news.json once, after the pool)."""
+        with news_sem:
+            with news_state_lock:
+                if news_state["broken"]:
+                    news_state["skipped"] += 1
+                    return
+            entry, err = news_fetch_entry(tk, yf_module, news_cache.get(tk), news_now)
+            with news_state_lock:
+                news_got[tk] = entry
+                if entry["error"]:
+                    news_state["fail"] += 1
+                    if news_state["ok"] == 0 and news_state["fail"] >= NEWS_BREAK:
+                        news_state["broken"] = True
+                    if err and ("Too Many Requests" in err or "429" in err):
+                        news_state["rate"] = err
+                else:
+                    news_state["ok"] += 1
+
+    # news jobs interleaved with the meta work (news, meta, meta, news, ...):
+    # no burst of news requests at the start of a refresh
+    meta_jobs = [("meta", tk) for tk in tickers + watch] + [("divs", tk) for tk in tickers + sold_only]
+    jobs, mi = [], 0
+    for tk in news_jobs:
+        jobs.append(("news", tk))
+        jobs.extend(meta_jobs[mi:mi + 2])
+        mi += 2
+    jobs.extend(meta_jobs[mi:])
     with ThreadPoolExecutor(max_workers=12) as ex:
-        list(ex.map(meta_job, [("news", tk) for tk in news_movers
-                               if not news_fresh(news_cache.get(tk), news_now)]
-                    + [("meta", tk) for tk in tickers + watch]
-                    + [("divs", tk) for tk in tickers + sold_only]))
+        list(ex.map(meta_job, jobs))
     news_out = {"on": False}
     if news_on:
-        news_items, news_t = {}, {}
-        for tk in news_movers:
-            got = news_got.get(tk)
-            items, t = (got[0], got[1]) if got else (
-                news_entry_items(news_cache.get(tk)), news_entry_t(news_cache.get(tk)))
-            if items and t is not None:
-                news_items[tk], news_t[tk] = items, int(t)
+        if news_got:
+            save_news_entries(cache_dir, news_got, news_now)
+        if news_state["rate"]:
+            print("news: Yahoo is rate-limiting headline requests (Too Many Requests / 429)",
+                  file=sys.stderr)
+        # data.json: at least NEWS_KEEP_MIN per ticker, the largest window's
+        # `per` when more, cut (per_out) so at most NEWS_OUT_MAX stories go out
+        keep = max(NEWS_KEEP_MIN, news_plan["per"]) if news_plan else NEWS_KEEP_MIN
+        keep = min(keep, NEWS_KEEP_MAX)
+        raw_items, news_t, pending, failed_tks = {}, {}, [], []
+        for tk in news_planned:
+            entry = news_got.get(tk, news_cache.get(tk))
+            t = news_entry_t(entry)
+            if t is None:
+                pending.append(tk)
+                continue
+            if entry.get("error"):
+                failed_tks.append(tk)
+            items = news_entry_items(entry, keep)
+            if items:
+                raw_items[tk], news_t[tk] = items, int(t)
+        per_out = 1
+        for k in range(keep, 0, -1):
+            if sum(min(k, len(v)) for v in raw_items.values()) <= NEWS_OUT_MAX:
+                per_out = k
+                break
+        news_items = {tk: v[:per_out] for tk, v in raw_items.items()}
         news_out = {"on": True, "movePct": NEWS_MOVE_PCT, "items": news_items, "t": news_t}
         if news_panel:
             news_out["top"] = [tk for tk in news_movers if tk in news_items]
+            news_out["keep"] = per_out
+            news_out["pending"] = sorted(pending)
+            news_out["failed"] = sorted(failed_tks)
+            if news_t:
+                news_out["fetchedAt"] = max(news_t.values())
+            if news_dropped:
+                news_out["dropped"] = news_dropped
+        print("news: fetched %d, cached %d, pending %d, failed %d, skipped %d"
+              % (news_state["ok"], len(news_planned) - len(news_got) - len(pending),
+                 len(pending), len(failed_tks), news_state["skipped"]), file=sys.stderr)
 
     cash_total = sum(amount * (fx.factor(cur) or 0.0)
                      for cur, amount in cash.items())
