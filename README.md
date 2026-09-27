@@ -271,24 +271,31 @@ wide, a bigger or smaller graph, more or fewer rows, and panels folding away
 when there isn't room ("+N hidden — ⚙" says what). Double-click an edge to go
 back to the default width or to "fit content".
 
-**⚙** in the title row opens the editor for that window:
+**⚙** in the title row opens the settings for that window — three groups,
+each with a one-line hint (the **?** chip hides the hints):
 
-- **window** — title; **+ new window** from a template (full, graph only,
-  holdings, news & alerts, news page, ticker line, blank), duplicate, one
-  line, delete;
-  **reset everything** to the default look.
-- **size** — exact width and height (empty height = fit content), zoom
-  60–160%, and whether the left panels rotate or stack.
-- **features** — every header line, graph part (each range tab, modes, date
-  box, index line and picker, backtest, ⤢), panel (movers, sectors, risk, days,
-  holdings, earnings, alerts, price alerts, sales, income, rebalance, news),
-  holding-row detail and footer part can be switched on or off. Panels can be
-  moved up/down, to the other column (a⇄b) or to another window, and given a
-  priority: **always**, normal, or **room** (only when there's space) — the
-  layout folds "room" panels first when a window is short. A part (a range
-  tab, the index line, a footer item…) shows only while its block (the graph,
-  the footer…) is on: switching a block off hides its parts and remembers
-  which were on.
+- **Portfolio** — settings the whole portfolio shares, no JSON needed: its
+  name, currency, how many years of history (3 · 5 · 10 · everything), the
+  index to compare with, headlines on/off, big-move alerts on/off with both
+  thresholds, and whole-share or fractional rebalancing. A currency or
+  history change says "updates at the next refresh" until it has.
+- **This window** — its name, one line, size (narrow · normal · wide, or
+  exact width and height; empty height = fit content), zoom, **+ new window**
+  from a template (full, graph only, holdings, news & alerts, news page,
+  ticker line, blank), duplicate, delete, reset.
+- **What it shows** — tick the parts this window displays: the top numbers,
+  the graph and its buttons, each panel, the holdings list and its views,
+  the columns of every holding row, the bottom line. Hover a name for what it
+  is. **to top** next to a panel puts it first in its column. The **arrange**
+  switch reveals the expert controls: order (↑ ↓), left / right column, what
+  hides first when the window is short (hide last · normal · hide first),
+  and move to another window. A part (a range tab, the index line…) shows
+  only while its block (the graph…) is on.
+
+Columns balance themselves: a panel whose column you never picked goes to
+whichever side is shorter so far, so the left side doesn't run far below the
+right as you switch panels on and off; a column you picked is kept, and the
+holdings list stays left unless you move it.
 
 Each window keeps its own range, mode, page and view. Everything is saved in
 `_settings.display` and survives restarts; without it you get the single
@@ -381,7 +388,8 @@ lives somewhere else, set `PORTFOLIO_WIDGET_DIR` for the plugin.
 ## Settings
 
 In `positions.json`, under `"_settings"`. Every key is optional — leave one
-out for its default. Most are set for you by clicking in the widget.
+out for its default. All of them except `targets` can be set in the widget
+(⚙ → Portfolio); the file is for people who prefer a text editor.
 
 | key | default | what it does |
 |---|---|---|

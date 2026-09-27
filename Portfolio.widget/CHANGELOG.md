@@ -1,5 +1,35 @@
 # Changelog
 
+## 13.2
+
+- **Friendlier settings**: the ⚙ editor now reads like a settings screen.
+  Three groups — **Portfolio** (the whole portfolio's settings, shared by
+  every window), **This window** (name, place, size, zoom, new / duplicate /
+  delete) and **What it shows** (tick what this window displays) — in plain
+  words, with a short hint under each group ("?" hides the hints). Expert
+  controls (order, columns, what hides first when the window is short, move
+  to another window) sit behind one **arrange** switch.
+- **Portfolio settings without editing JSON**: name, currency, how many years
+  of history (3 · 5 · 10 · everything), the index to compare with, headlines
+  on/off, big-move alerts on/off with both thresholds, and whole-share or
+  fractional rebalancing — all clickable in ⚙ → Portfolio. A currency or
+  history change says "updates at the next refresh" until it has.
+- **Plain names for every part**: "value at the hovered moment" instead of
+  "readout", "jump to a date" instead of "date box", "volatility score"
+  instead of "vol badge", and so on; hover any name for a one-line
+  explanation. Saved windows keep working — only the words changed.
+- **Columns balance themselves**: a panel whose column you never picked goes
+  to the side that is shorter so far, so the left side no longer runs far
+  below the right when you switch panels on and off. A column you picked
+  yourself is kept; the holdings list stays left unless you move it.
+- **"to top"** next to every panel in ⚙ → What it shows puts it first in its
+  column with one click (no need to open arrange).
+- Fixes: a saved name, currency, history length or alert setting is kept in
+  the widget's cache across refreshes (the Portfolio group showed the
+  defaults again after a refresh); in a window narrower than 400 px the
+  index caption says "even" instead of "even with XIU.TO", which ran into
+  "index ▾".
+
 ## 13.1
 
 - **News page**: a window (or the news panel in any window) that shows

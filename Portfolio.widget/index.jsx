@@ -40,7 +40,7 @@ const SORT_TIP = {
 // (that crashed the 12.x upgrade with "undefined is not an object"), so any
 // state not stamped with this version starts over, keeping only the data
 // that is already on screen. Bump it whenever the state's shape changes.
-const STATE_VERSION = "13.1";
+const STATE_VERSION = "13.2";
 
 // older day-by-day rows loaded on demand ("older ›", an old date typed in the
 // date box, a custom start before the newest ~400 days). `key` ties them to
@@ -98,6 +98,11 @@ export const initialState = {
   newsPage: 0,           // the news panel's page (per window)
   newsQuery: null, newsQFrom: "",   // the news page's live keyword (13.1; newsQFrom = the cfg.q it was typed over; not saved)
   newsPickMsg: null,     // the news page editor's "not a ticker: …" note (5 s)
+  // the ⚙ editor (13.2, shared by every window): the "arrange" switch (order,
+  // columns, priorities, moves), the hint lines, the note after a currency /
+  // history save {key, epoch, msg} (shown while data.json still carries that
+  // epoch) and a per-setting message {key: text} (an error, or a 5 s note)
+  editAdvanced: false, editHints: true, settingPending: null, editMsg: {},
 };
 
 // Per-window state: every window keeps its own copy of these (range, pinned
@@ -238,73 +243,73 @@ const WIDGET_W = LAYOUT_K.BASE_CW + LAYOUT_K.PAD_X;   // 664: a window's default
 // side a/b = left/right column; car = in the left carousel; full: false = not
 // in the full template, i.e. not in 12.11's look).
 const FEATURES = [
-  { id: "header.value", label: "total value", kind: "head", p: "always" },
-  { id: "header.day", label: "today's change", kind: "head", p: "always" },
-  { id: "header.fx", label: "prices · fx", kind: "head", p: "room" },
-  { id: "header.pl", label: "P&L (click: vs invested)", kind: "head", p: "normal" },
-  { id: "header.div", label: "dividends ~/yr", kind: "head", p: "room" },
-  { id: "header.realized", label: "realized", kind: "head", p: "room" },
-  { id: "header.totalReturn", label: "total return", kind: "head", p: "room" },
-  { id: "header.annual", label: "annual return %/yr", kind: "head", p: "room" },
-  { id: "graph", label: "graph", kind: "block", p: "normal" },
-  { id: "graph.tabs", label: "range tabs row", kind: "part", parent: "graph", p: "normal" },
-  { id: "graph.range.1H", label: "1H", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.1D", label: "1D", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.1W", label: "1W", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.1M", label: "1M", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.1Y", label: "1Y", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.3Y", label: "3Y", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.5Y", label: "5Y", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.10Y", label: "10Y", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.MAX", label: "MAX", kind: "part", parent: "graph.tabs" },
-  { id: "graph.range.ALL", label: "ALL", kind: "part", parent: "graph.tabs" },
-  { id: "graph.modes", label: "value · p&l · sectors", kind: "part", parent: "graph.tabs" },
-  { id: "graph.mode.value", label: "value", kind: "part", parent: "graph.modes" },
-  { id: "graph.mode.pl", label: "p&l", kind: "part", parent: "graph.modes" },
-  { id: "graph.mode.sectors", label: "sectors", kind: "part", parent: "graph.modes" },
-  { id: "graph.date", label: "date box", kind: "part", parent: "graph.tabs" },
-  { id: "graph.readout", label: "readout", kind: "part", parent: "graph.tabs" },
-  { id: "graph.big", label: "⤢ bigger graph", kind: "part", parent: "graph.tabs" },
-  { id: "graph.bench", label: "index line + caption", kind: "part", parent: "graph", p: "room" },
-  { id: "graph.benchPicker", label: "index picker", kind: "part", parent: "graph.bench" },
-  { id: "graph.backtest", label: "backtest years + caption", kind: "part", parent: "graph", p: "room" },
-  { id: "graph.late", label: "\"starts later\" note", kind: "part", parent: "graph", p: "room" },
-  { id: "graph.notes", label: "notes line", kind: "part", parent: "graph", p: "room" },
-  { id: "panel.today", label: "today · movers", kind: "panel", p: "normal", side: "a", car: true },
-  { id: "panel.sectors", label: "sectors", kind: "panel", p: "normal", side: "a", car: true },
-  { id: "panel.risk", label: "risk", kind: "panel", p: "normal", side: "a", car: true },
-  { id: "panel.days", label: "days", kind: "panel", p: "room", side: "a", car: true },
-  { id: "panel.holdings", label: "holdings (+ detail view)", kind: "panel", p: "normal", side: "a" },
-  { id: "holdings.list", label: "list", kind: "part", parent: "panel.holdings" },
-  { id: "holdings.map", label: "map", kind: "part", parent: "panel.holdings" },
-  { id: "holdings.watch", label: "watch", kind: "part", parent: "panel.holdings" },
-  { id: "holdings.add", label: "+ buy / sell", kind: "part", parent: "panel.holdings" },
-  { id: "holdings.sort", label: "sort", kind: "part", parent: "panel.holdings" },
-  { id: "holdings.pages", label: "page dots", kind: "part", parent: "panel.holdings" },
-  { id: "map.drift", label: "map: drift tab", kind: "part", parent: "holdings.map" },
-  { id: "detail.alerts", label: "detail: alert box", kind: "part", parent: "panel.holdings" },
-  { id: "detail.news", label: "detail: headlines", kind: "part", parent: "panel.holdings" },
-  { id: "detail.target", label: "detail: target line", kind: "part", parent: "panel.holdings" },
-  { id: "panel.earnings", label: "earnings", kind: "panel", p: "normal", side: "b" },
-  { id: "panel.sales", label: "sales · realized", kind: "panel", p: "room", side: "b" },
-  { id: "panel.income", label: "income · dividends", kind: "panel", p: "room", side: "b" },
-  { id: "panel.rebalance", label: "rebalance", kind: "panel", p: "normal", side: "b" },
-  { id: "panel.priceAlerts", label: "price alerts", kind: "panel", p: "normal", side: "b" },
-  { id: "panel.alerts", label: "alerts · last 7 days", kind: "panel", p: "normal", side: "b" },
-  { id: "panel.news", label: "news (headlines)", kind: "panel", p: "normal", side: "b", full: false },
-  { id: "row.spark", label: "sparkline", kind: "cell" },
-  { id: "row.vol", label: "vol badge", kind: "cell" },
-  { id: "row.drift", label: "drift badge", kind: "cell" },
-  { id: "row.day", label: "day %", kind: "cell" },
-  { id: "row.value", label: "value", kind: "cell" },
-  { id: "row.pl", label: "P&L %", kind: "cell" },
-  { id: "row.bell", label: "🔔", kind: "cell" },
-  { id: "row.news", label: "news dot", kind: "cell" },
-  { id: "row.price", label: "price (in its currency)", kind: "cell", full: false },
-  { id: "footer", label: "footer", kind: "block", p: "room" },
-  { id: "footer.stats", label: "estimated cost · snapshots", kind: "part", parent: "footer" },
-  { id: "footer.updated", label: "updated … ago", kind: "part", parent: "footer" },
-  { id: "footer.export", label: "export", kind: "part", parent: "footer" },
+  { id: "header.value", label: "total value", tip: "what everything you own is worth right now", kind: "head", p: "always" },
+  { id: "header.day", label: "today's change", tip: "how much the portfolio moved today", kind: "head", p: "always" },
+  { id: "header.fx", label: "price and currency moves", tip: "today's price move and the currency move, side by side", kind: "head", p: "room" },
+  { id: "header.pl", label: "profit / loss", tip: "click it to see it against what you invested", kind: "head", p: "normal" },
+  { id: "header.div", label: "dividends per year", tip: "the dividends you can expect in a year", kind: "head", p: "room" },
+  { id: "header.realized", label: "realized gains", tip: "profit or loss from what you have already sold", kind: "head", p: "room" },
+  { id: "header.totalReturn", label: "total return", tip: "profit plus dividends, against what you invested", kind: "head", p: "room" },
+  { id: "header.annual", label: "annual return", tip: "the yearly return, on average", kind: "head", p: "room" },
+  { id: "graph", label: "graph", tip: "the value graph", kind: "block", p: "normal" },
+  { id: "graph.tabs", label: "time range buttons", tip: "the 1D · 1W · 1M … buttons that set the graph's time range", kind: "part", parent: "graph", p: "normal" },
+  { id: "graph.range.1H", label: "1H", tip: "the last hour", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.1D", label: "1D", tip: "today", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.1W", label: "1W", tip: "the last week", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.1M", label: "1M", tip: "the last month", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.1Y", label: "1Y", tip: "the last year", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.3Y", label: "3Y", tip: "the last 3 years", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.5Y", label: "5Y", tip: "the last 5 years", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.10Y", label: "10Y", tip: "the last 10 years", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.MAX", label: "MAX", tip: "as far back as the history goes", kind: "part", parent: "graph.tabs" },
+  { id: "graph.range.ALL", label: "ALL", tip: "since your first purchase", kind: "part", parent: "graph.tabs" },
+  { id: "graph.modes", label: "value / profit / sectors buttons", tip: "switch the graph between value, profit and sectors", kind: "part", parent: "graph.tabs" },
+  { id: "graph.mode.value", label: "value", tip: "the graph shows what the portfolio is worth", kind: "part", parent: "graph.modes" },
+  { id: "graph.mode.pl", label: "p&l", tip: "the graph shows profit or loss", kind: "part", parent: "graph.modes" },
+  { id: "graph.mode.sectors", label: "sectors", tip: "the graph shows each sector", kind: "part", parent: "graph.modes" },
+  { id: "graph.date", label: "jump to a date", tip: "type a date to jump the graph there", kind: "part", parent: "graph.tabs" },
+  { id: "graph.readout", label: "value under the mouse", tip: "the value at the point under the mouse", kind: "part", parent: "graph.tabs" },
+  { id: "graph.big", label: "bigger-graph button (⤢)", tip: "the button that makes the graph taller", kind: "part", parent: "graph.tabs" },
+  { id: "graph.bench", label: "index line", tip: "a thin grey line for the index you compare with", kind: "part", parent: "graph", p: "room" },
+  { id: "graph.benchPicker", label: "index chooser", tip: "the link that lets you pick another index", kind: "part", parent: "graph.bench" },
+  { id: "graph.backtest", label: "'what if you had bought earlier'", tip: "what the portfolio would have done if bought earlier", kind: "part", parent: "graph", p: "room" },
+  { id: "graph.late", label: "note for newer holdings", tip: "a note when a holding is newer than the graph's start", kind: "part", parent: "graph", p: "room" },
+  { id: "graph.notes", label: "notes under the graph", tip: "small notes under the graph (data gaps, loading)", kind: "part", parent: "graph", p: "room" },
+  { id: "panel.today", label: "today's biggest movers", tip: "today's biggest risers and fallers", kind: "panel", p: "normal", side: "a", car: true },
+  { id: "panel.sectors", label: "sectors", tip: "how much sits in each sector", kind: "panel", p: "normal", side: "a", car: true },
+  { id: "panel.risk", label: "risk numbers", tip: "how risky the mix is (swings, concentration)", kind: "panel", p: "normal", side: "a", car: true },
+  { id: "panel.days", label: "day-by-day results", tip: "one line per day: value and change", kind: "panel", p: "room", side: "a", car: true },
+  { id: "panel.holdings", label: "holdings", tip: "the list of everything you own; click one for its detail", kind: "panel", p: "normal", side: "a" },
+  { id: "holdings.list", label: "list", tip: "the plain list of holdings", kind: "part", parent: "panel.holdings" },
+  { id: "holdings.map", label: "heat map", tip: "a map of boxes sized by value, coloured by change", kind: "part", parent: "panel.holdings" },
+  { id: "holdings.watch", label: "watchlist", tip: "stocks you follow but don't own", kind: "part", parent: "panel.holdings" },
+  { id: "holdings.add", label: "buy / sell button", tip: "the button that records a purchase or a sale", kind: "part", parent: "panel.holdings" },
+  { id: "holdings.sort", label: "sort buttons", tip: "the buttons that sort the list", kind: "part", parent: "panel.holdings" },
+  { id: "holdings.pages", label: "page dots", tip: "the dots that page a long list", kind: "part", parent: "panel.holdings" },
+  { id: "map.drift", label: "heat map: colour by off-target", tip: "colour the map by how far each holding is from its target", kind: "part", parent: "holdings.map" },
+  { id: "detail.alerts", label: "stock detail: price alert box", tip: "the price-level box in a stock's detail view", kind: "part", parent: "panel.holdings" },
+  { id: "detail.news", label: "stock detail: headlines", tip: "headlines in a stock's detail view", kind: "part", parent: "panel.holdings" },
+  { id: "detail.target", label: "stock detail: target line", tip: "the target share line in a stock's detail view", kind: "part", parent: "panel.holdings" },
+  { id: "panel.earnings", label: "earnings dates", tip: "when each company reports next", kind: "panel", p: "normal", side: "b" },
+  { id: "panel.sales", label: "sales and realized gains", tip: "what you sold and the profit on it", kind: "panel", p: "room", side: "b" },
+  { id: "panel.income", label: "dividend income", tip: "dividends received and expected", kind: "panel", p: "room", side: "b" },
+  { id: "panel.rebalance", label: "rebalancing", tip: "what to buy or sell to get back to your targets", kind: "panel", p: "normal", side: "b" },
+  { id: "panel.priceAlerts", label: "your price alerts", tip: "price levels you set yourself — works without big-move alerts", kind: "panel", p: "normal", side: "b" },
+  { id: "panel.alerts", label: "big moves this week", tip: "the week's big moves — needs Portfolio → big-move alerts on", kind: "panel", p: "normal", side: "b" },
+  { id: "panel.news", label: "news", tip: "headlines for your holdings", kind: "panel", p: "normal", side: "b", full: false },
+  { id: "row.spark", label: "tiny price graph", tip: "a small graph of the last days' prices", kind: "cell" },
+  { id: "row.vol", label: "how jumpy (volatility)", tip: "how much the price swings", kind: "cell" },
+  { id: "row.drift", label: "off-target badge", tip: "how far the holding is from its target share", kind: "cell" },
+  { id: "row.day", label: "today's %", tip: "today's move in percent", kind: "cell" },
+  { id: "row.value", label: "value", tip: "what the holding is worth", kind: "cell" },
+  { id: "row.pl", label: "profit %", tip: "profit or loss in percent", kind: "cell" },
+  { id: "row.bell", label: "alert bell", tip: "a bell when a price alert is set on it", kind: "cell" },
+  { id: "row.news", label: "news dot", tip: "a dot when there are fresh headlines", kind: "cell" },
+  { id: "row.price", label: "price in its own currency", tip: "the price in the stock's own currency", kind: "cell", full: false },
+  { id: "footer", label: "bottom row", tip: "the dim row at the bottom", kind: "block", p: "room" },
+  { id: "footer.stats", label: "small print (costs, saved data)", tip: "estimated data costs and how much history is saved", kind: "part", parent: "footer" },
+  { id: "footer.updated", label: "'updated … ago'", tip: "when the data was last updated", kind: "part", parent: "footer" },
+  { id: "footer.export", label: "export link", tip: "a link that exports the holdings to a file", kind: "part", parent: "footer" },
 ];
 const FEATURE_BY = {};
 FEATURES.forEach((f) => { FEATURE_BY[f.id] = f; });
@@ -318,16 +323,16 @@ const pickItems = (roots) => FULL_ITEMS.filter((id) => roots.some((r) => isUnder
 const HEAD2 = ["header.value", "header.day"];
 // "+ new window" starts from one of these (x/y: placeNear)
 const TEMPLATES = [
-  { key: "full", label: "full", w: WIDGET_W, h: "auto" },
-  { key: "graph", label: "graph only", items: pickItems(HEAD2.concat(["graph"])), w: WIDGET_W, h: 260 },
-  { key: "holdings", label: "holdings", w: 380, h: "auto",
+  { key: "full", label: "full", desc: "everything, like the classic widget", w: WIDGET_W, h: "auto" },
+  { key: "graph", label: "graph only", desc: "just the graph with the totals above", items: pickItems(HEAD2.concat(["graph"])), w: WIDGET_W, h: 260 },
+  { key: "holdings", label: "holdings", desc: "the holdings list on its own", w: 380, h: "auto",
     items: pickItems(HEAD2.concat(["panel.holdings"], FULL_ITEMS.filter((id) => FEATURE_BY[id].kind === "cell"))) },
-  { key: "news", label: "news & alerts", items: HEAD2.concat(["panel.news", "panel.priceAlerts", "panel.alerts"]), w: 360, h: 420, news: true,
+  { key: "news", label: "news & alerts", desc: "headlines and alerts, nothing else", items: HEAD2.concat(["panel.news", "panel.priceAlerts", "panel.alerts"]), w: 360, h: 420, news: true,
     tip: "today's movers' headlines, price alerts and alerts" },
-  { key: "newspage", label: "news page", items: HEAD2.concat(["panel.news"]), w: 480, h: 560, news: true,
+  { key: "newspage", label: "news page", desc: "a tall page of headlines", items: HEAD2.concat(["panel.news"]), w: 480, h: 560, news: true,
     newsCfg: { scope: "all", per: 5, sort: "new" }, tip: "headlines for every holding and the watchlist — turns headlines on" },
-  { key: "ticker", label: "ticker line", items: HEAD2.slice(), compact: true, w: 420 },
-  { key: "blank", label: "blank", items: [], w: 360, h: 200 },
+  { key: "ticker", label: "ticker line", desc: "a small one-line ticker for the corner of the screen", items: HEAD2.slice(), compact: true, w: 420 },
+  { key: "blank", label: "blank", desc: "an empty window — tick what it shows", items: [], w: 360, h: 200 },
 ];
 
 // _settings.display, checked like display_prefs.clean_display (lenient: a bad
@@ -515,6 +520,30 @@ const patchWin = (disp, id, patch) => ({ windows: disp.windows.map((w) => {
 // Saving: the screen follows at once (SET_DISPLAY), the file 300 ms after the
 // last change, one save at a time, the latest wins (a slider or a drag never
 // saves per step). setting display (set_setting.py) patches data.ui in place.
+// One queue for every `setting` save (13.2): two set_setting.py runs at the
+// same moment each load and rewrite positions.json / data.json and one would
+// undo the other's change, so each run starts after the previous one answered.
+let settingChain = Promise.resolve();
+const runQueued = (args) => {
+  const p = settingChain.then(() => run(helper(args)));
+  settingChain = p.then(() => null, () => null);
+  return p;
+};
+// a portfolio setting from the ⚙ editor: the reply's ui value goes into
+// data.ui at once (UI_PATCH), an error shows under the row (EDIT_MSG)
+const saveSetting = (key, value, dispatch) => runQueued(["setting", key, String(value)]).then((out) => {
+  const r = parseJson(String(out).trim());
+  if (!r || r.error) {
+    dispatch({ type: "EDIT_MSG", key: key, msg: (r && r.error) || "could not save " + key });
+    return r || { error: "could not save " + key };
+  }
+  dispatch({ type: "EDIT_MSG", key: key, msg: null });
+  if (r.ok && r.key === key && "value" in r) dispatch({ type: "UI_PATCH", key: key, value: r.value });
+  return r;
+}, () => {
+  dispatch({ type: "EDIT_MSG", key: key, msg: "could not save " + key });
+  return { error: "could not save " + key };
+});
 const DISPLAY_SAVE_MS = 300;
 const DISPLAY_SAVE_STUCK_MS = 15000;   // a save that never answers stops blocking the next one
 const dispSave = { timer: null, want: null, busy: 0 };
@@ -529,7 +558,7 @@ const flushDisplay = () => {
     dispSave.busy = 0;
     if (dispSave.want !== null && !dispSave.timer) flushDisplay();
   };
-  Promise.resolve().then(() => run(helper(["setting", "display", arg]))).then(done, done);
+  runQueued(["setting", "display", arg]).then(done, done);
 };
 const saveDisplay = (disp, dispatch) => {
   dispatch({ type: "SET_DISPLAY", display: disp });
@@ -599,7 +628,8 @@ const coreReducer = (event, prev) => {
       return merge(prev, { raw: parsed, parseError: parseError, tick: prev.tick + 1,
         rot: prev.hover ? prev.rot : prev.rot + 1, older: older,
         alertMsg: fade ? null : prev.alertMsg,
-        benchWant: benchWantAfter(prev, parsed && parsed.data) });
+        benchWant: benchWantAfter(prev, parsed && parsed.data),
+        settingPending: prev.settingPending && parsed && parsed.data && parsed.data.epoch !== prev.settingPending.epoch ? null : prev.settingPending });
     }
     case "TOGGLE_GRAPH_BIG":
       return merge(prev, { graphBig: typeof event.on === "boolean" ? event.on : !graphBigOf(prev) });
@@ -755,6 +785,25 @@ const coreReducer = (event, prev) => {
     case "SET_NEWS_QUERY": return merge(prev, { newsQuery: typeof event.value === "string" ? event.value : null,
       newsQFrom: typeof event.from === "string" ? event.from : "", newsPage: 0 });
     case "NEWS_PICK_MSG": return merge(prev, { newsPickMsg: typeof event.msg === "string" ? event.msg : null });
+    // the ⚙ editor's shared switches and notes (13.2)
+    case "EDIT_ADVANCED": return merge(prev, { editAdvanced: event.on === true });
+    case "EDIT_HINTS": return merge(prev, { editHints: event.on !== false });
+    case "SETTING_PENDING": return merge(prev, { settingPending: event.key && typeof event.key === "string"
+      ? { key: event.key, epoch: event.epoch, msg: String(event.msg || "") } : null });
+    case "EDIT_MSG": {
+      if (typeof event.key !== "string") return prev;
+      const m = Object.assign({}, prev.editMsg || {});
+      if (typeof event.msg === "string" && event.msg) m[event.key] = event.msg; else delete m[event.key];
+      return merge(prev, { editMsg: m });
+    }
+    // a saved setting's reply (set_setting.py's ui value) goes into data.ui at
+    // once, so the editor shows it before the next data.json is read
+    case "UI_PATCH": {
+      if (typeof event.key !== "string" || !prev.raw || !prev.raw.data || typeof prev.raw.data !== "object") return prev;
+      const ui = Object.assign({}, prev.raw.data.ui && typeof prev.raw.data.ui === "object" ? prev.raw.data.ui : {});
+      ui[event.key] = event.value;
+      return merge(prev, { raw: Object.assign({}, prev.raw, { data: Object.assign({}, prev.raw.data, { ui: ui }) }) });
+    }
     default: return prev;
   }
 };
@@ -2651,12 +2700,12 @@ const removeAlert = (id, dispatch) => alertCall(["remove", id], dispatch, false)
 const savePref = (key, on, dispatch) => {
   dispatch(key === "graphBig" ? { type: "TOGGLE_GRAPH_BIG", on: on }
     : key === "news" ? { type: "SET_NEWS_PREF", on: on } : { type: "SET_SHOW_BENCH", on: on });
-  return run(helper(["setting", key, on ? "true" : "false"])).catch(() => {});
+  return runQueued(["setting", key, on ? "true" : "false"]).catch(() => {});
 };
 // one line or everything (a title click, 12.11), saved the same way
 const toggleCompact = (on, dispatch) => {
   dispatch({ type: "SET_COMPACT", on: on });
-  return run(helper(["setting", "compact", on ? "true" : "false"])).catch(() => {});
+  return runQueued(["setting", "compact", on ? "true" : "false"]).catch(() => {});
 };
 // a title click; the second click of a double-click doesn't toggle back, and
 // the click that ends a drag of the title row never gets here (swallowClick)
@@ -2797,8 +2846,8 @@ const pickBench = (value, hidden, dispatch) => {
   // positions.json / data.json, and one would undo the other's change
   const show = hidden && v !== "none";
   if (show) dispatch({ type: "SET_SHOW_BENCH", on: true });
-  const saveShow = () => (show ? run(helper(["setting", "showBenchmark", "true"])).catch(() => {}) : null);
-  return run(helper(["setting", "benchmark", v]))
+  const saveShow = () => (show ? runQueued(["setting", "showBenchmark", "true"]).catch(() => {}) : null);
+  return runQueued(["setting", "benchmark", v])
     .then((out) => {
       const r = parseJson(String(out).trim());
       if (!r || r.error) dispatch({ type: "BENCH_FAIL", msg: (r && r.error) || "could not save the index" });
@@ -3437,7 +3486,8 @@ const REBAL_REASON = {
 };
 const saveRebalWhole = (on, dispatch) => {
   dispatch({ type: "SET_REBAL_WHOLE", on: on });
-  return run(helper(["setting", "rebalanceWhole", on ? "true" : "false"])).catch(() => {});
+  // null = "default": the key is removed, the widget chooses (13.2)
+  return saveSetting("rebalanceWhole", on === true ? "true" : on === false ? "false" : "default", dispatch);
 };
 const buyList = (buys) => (Array.isArray(buys) ? buys : []).filter((b) => b && isFin(b.amount))
   .map((b) => b.key + " " + money(b.amount, true)).join("\n");
@@ -4317,11 +4367,14 @@ const layoutFor = (win, ctx, K0) => {
   (ctx.order || []).forEach((id, i) => {
     const f = FEATURE_BY[id];
     if (!on[id] || !f || f.kind !== "panel") return;
+    const picked = !!(w0.side && (w0.side[id] === "a" || w0.side[id] === "b"));
     if (f.car && rotate) {
-      if (!car) { car = { key: "carousel", ids: [], side: sideOf(id), pos: 100 + i, p: prioOf(id) }; units.push(car); }
+      if (!car) { car = { key: "carousel", ids: [], side: sideOf(id), pos: 100 + i, p: prioOf(id), free: !picked }; units.push(car); }
       car.ids.push(id);
+      if (picked) { car.free = false; car.side = sideOf(id); }
       if (PRIO_RANK[prioOf(id)] > PRIO_RANK[car.p]) car.p = prioOf(id);
-    } else units.push({ key: id, ids: [id], side: sideOf(id), pos: 100 + i, p: prioOf(id) });
+    } else units.push({ key: id, ids: [id], side: sideOf(id), pos: 100 + i, p: prioOf(id),
+      free: !picked && id !== "panel.holdings" });
   });
   const estId = (id, w, R) => (ctx.est && ctx.est[id] ? ctx.est[id](w, R) : K.EYEBROW);
   const uEst = (u, w, R) => u.ids.reduce((m, id) => Math.max(m, estId(id, w, R)), 0);
@@ -4329,9 +4382,22 @@ const layoutFor = (win, ctx, K0) => {
   const assign = (us) => {
     let n = Math.min(CW >= K.COL3 ? 3 : CW >= K.COL2 ? 2 : 1, us.length);
     if (!n) return { cols: [], colW: [], flex: [], unitW: CW };
-    const A = us.filter((u) => u.side === "a"), B = us.filter((u) => u.side !== "a");
     const uw = (m) => (CW - K.GUTTER * (m - 1)) / m;
     const est0 = (m) => (u) => uEst(u, uw(m), R0);
+    // auto-balance (13.2): a panel whose column the user never picked goes to
+    // the column that is shorter so far (its default column on a tie), so the
+    // left side never runs far below the right; picked columns are kept, and
+    // the holdings panel anchors the left unless moved
+    if (n >= 2) {
+      const e = est0(2), h = { a: 0, b: 0 };
+      us.forEach((u) => { if (!u.free) h[u.side] += e(u) + K.GAP; });   // the anchors first (the holdings list)
+      us.forEach((u) => {
+        if (!u.free) return;
+        u.side = h.a === h.b ? u.side : h.a < h.b ? "a" : "b";
+        h[u.side] += e(u) + K.GAP;
+      });
+    }
+    const A = us.filter((u) => u.side === "a"), B = us.filter((u) => u.side !== "a");
     let cols;
     if (n === 1) cols = [A.concat(B)];
     else if (A.length && B.length) {
@@ -4511,8 +4577,8 @@ const compactSpark = (d) => {
 // screen follows at once, the file once, 300 ms after the last change.
 const FEATURE_IDX = {};
 FEATURES.forEach((f, i) => { FEATURE_IDX[f.id] = i; });
-const EDIT_FEATURE_GROUPS = [["header", "header lines"], ["graph", "graph"], ["panels", "panels"],
-  ["holdings", "holdings"], ["rows", "holding rows"], ["footer", "footer"]];
+const EDIT_FEATURE_GROUPS = [["header", "Top numbers"], ["graph", "Graph"], ["panels", "Panels"],
+  ["holdings", "Holdings"], ["rows", "Each holding's row"], ["footer", "Small print (bottom row)"]];
 const editGroupOf = (id) => (id.indexOf("header.") === 0 ? "header"
   : id === "graph" || id.indexOf("graph.") === 0 ? "graph"
   : id === "panel.holdings" || /^(holdings|map|detail)\./.test(id) ? "holdings"
@@ -4556,6 +4622,16 @@ const shiftPanel = (w, id, dir) => {
   const a = items.indexOf(id), b = items.indexOf(other);
   items[a] = other;
   items[b] = id;
+  return items;
+};
+// "to top" (13.2): the panel goes before every other panel in the order (so
+// it is the first in its column); null = already there
+const topPanel = (w, id) => {
+  const items = winItems(w);
+  const first = items.find((x) => FEATURE_BY[x] && FEATURE_BY[x].kind === "panel");
+  if (!first || first === id) return null;
+  items.splice(items.indexOf(id), 1);
+  items.splice(items.indexOf(first), 0, id);
   return items;
 };
 // "→ window": the id with its parts that are on goes to the end of the other
@@ -4645,20 +4721,43 @@ const edBox = css`
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
   font-family: "SF Mono", Menlo, monospace;
-  font-size: 9px;
+  font-size: 9.5px;
   line-height: 1.45;
   color: ${C.ink};
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 `;
 const edHead = css`
   cursor: pointer;
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 9.5px;
   color: ${C.dim};
-  margin-top: 4px;
+  margin-top: 5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+`;
+const edHeadOn = css`
+  color: ${C.ink};
+`;
+const edCaption = css`
+  display: flex;
+  align-items: baseline;
+  column-gap: 6px;
+  margin-top: 8px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: ${C.dim};
+  min-width: 0;
+`;
+const edHint = css`
+  color: ${C.dim};
+  opacity: 0.8;
+  font-size: 8.5px;
+  line-height: 1.4;
+  margin: 1px 0 2px;
+  white-space: normal;
+  min-width: 0;
 `;
 const edLine = css`
   display: flex;
@@ -4666,12 +4765,12 @@ const edLine = css`
   align-items: baseline;
   column-gap: 6px;
   row-gap: 2px;
-  margin-top: 3px;
+  margin-top: 4px;
   min-width: 0;
 `;
 const edChip = css`
   cursor: pointer;
-  padding: 0 3px;
+  padding: 1px 4px;
   border-radius: 3px;
   color: ${C.dim};
   white-space: nowrap;
@@ -4680,12 +4779,45 @@ const edChipOn = css`
   color: ${C.ink};
   background: rgba(255, 255, 255, 0.1);
 `;
-const edNum = { width: 50, fontSize: 9, padding: "1px 4px", flex: "none" };
+const edNum = { width: 50, fontSize: 9.5, padding: "1px 4px", flex: "none" };
+const edText = { flex: "1 1 80px", minWidth: 0, fontSize: 9.5, padding: "1px 4px" };
 const edLabel = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, cursor: "pointer" };
 const edDim = { color: C.dim, whiteSpace: "nowrap" };
+const edMsg = { color: C.amber, minWidth: 0, whiteSpace: "normal" };
+const edNote = { color: C.dim, minWidth: 0, whiteSpace: "normal", fontSize: 8.5 };
 
-const PRIO_TIPS = { always: "always shown: the last to fold when the window is short",
-  normal: "normal", room: "only when there is room: the first to fold" };
+// the "arrange" chips (13.2): friendly words, the saved ids stay always / normal / room
+const PRIO_LABELS = { always: "hide last", normal: "normal", room: "hide first" };
+const PRIO_TIPS = { always: "stays when the window is short", normal: "", room: "hidden first when the window is short" };
+const EDIT_HINTS = {
+  portfolio: "Settings for the whole portfolio — every window shares them.",
+  window: "Its name, place and size. Drag the title row to move it, the edges to resize.",
+  arrange: "order, left / right column, what hides first when the window is short, move to another window",
+  arrangeOff: "Tick what each part shows. Click arrange to change order, columns and what hides first.",
+  header: "Tick what this window shows. If the window is too short, some panels hide until there is room.",
+  graph: "The graph and the buttons around it.",
+  panels: "The boxes under the graph.",
+  holdings: "The holdings list, heat map and watchlist.",
+  rows: "The columns of every holding row.",
+  footer: "The dim row at the very bottom.",
+};
+const EDIT_HEAD_TIPS = {
+  header: "Top numbers: the row of figures above the graph", graph: "Graph: the value graph and its buttons",
+  panels: "Panels: the boxes under the graph", holdings: "Holdings: the list of what you own",
+  rows: "Each holding's row: the columns in the list", footer: "Small print: the bottom row",
+};
+const SIZE_PRESETS = [["narrow", 360], ["normal", WIDGET_W], ["wide", 992]];
+const HISTORY_ORDER = ["3", "5", "10", "max"];
+const HISTORY_LABELS = { "3": "3 years", "5": "5 years", "10": "10 years", max: "everything" };
+const PENDING_NOTE = "takes effect on the next update (about a minute)";
+const PENDING_LONGER = "loading more history — the graph fills in over the next few minutes";
+const ALERTS_NOTE = "No notification? Allow Script Editor in System Settings → Notifications.";
+const CURRENCY_CHIPS = ["USD", "EUR", "GBP", "CAD"];
+const BENCH_NAME = {};
+BENCH_GROUPS.forEach((g) => g.items.forEach((it) => { BENCH_NAME[it[0]] = it[1]; }));
+// a field commits on Enter and again when it loses focus: the same value is
+// sent once, until the reply is back (then a retry after an error works)
+const edSent = {};
 
 // state = the window's view, L = its layout (null in the one-line view),
 // has = id -> false when the data has nothing for it yet
@@ -4698,87 +4830,183 @@ const editorNode = (state, dispatch, d, L, has) => {
   const others = base.windows.filter((w) => w.id !== id);
   const put = (disp) => { if (disp) saveDisplay(disp, dispatch); };
   const setWin = (patch) => put(patchWin(base, id, patch));
-  const open = state.editGroup || "window";
+  const open = state.editGroup === "size" ? "window" : state.editGroup || "portfolio";
   const confirm = state.editConfirm;
+  const hints = state.editHints !== false;
+  const adv = state.editAdvanced === true;
+  const ui = uiPrefs(state);
   const half = G.Wu - LAYOUT_K.PAD_X >= 860;   // two columns only where a panel row (chips and all) fits on one line
   const set = itemSetOf(winItems(dw));
-  const nameOf = (w) => w.title || d.name || "portfolio";
-  const chip = (label, on, onClick, title, key) => (
-    <span key={key || label} className={on ? css`${edChip} ${edChipOn}` : edChip} onClick={onClick} title={title}>{label}</span>
+  const pfName = ui.title || d.name || "portfolio";
+  const nameOf = (w) => w.title || pfName;
+  const chip = (label, on, onClick, title, key, pw) => (
+    <span key={key || label} className={on ? css`${edChip} ${edChipOn}` : edChip} onClick={onClick} title={title || undefined}
+      data-pw-edchip={pw && pw.chip} data-pw-prio={pw && pw.prio} data-pw-edctl={pw && pw.ctl} data-pw-edadv={pw && pw.adv} data-pw-edhints={pw && pw.hints}>{label}</span>
   );
-  const group = (key, label, body) => (
+  const group = (key, label, body, tip) => (
     <div key={key}>
-      <div className={edHead} data-pw-edgroup={key}
+      <div className={open === key ? css`${edHead} ${edHeadOn}` : edHead} data-pw-edgroup={key} title={tip || undefined}
         onClick={() => dispatch({ type: "EDIT_GROUP", group: open === key ? "none" : key })}>
         {(open === key ? "▾ " : "▸ ") + label}
       </div>
+      {open === key && hints && EDIT_HINTS[key] ? <div className={edHint}>{EDIT_HINTS[key]}</div> : null}
       {open === key ? body() : null}
     </div>
   );
 
-  // ---- window: title, new / duplicate / delete, one line, reset everything
+  // ---- portfolio: _settings the file used to be the only way to (13.2)
+  const msgOf = (key) => (state.editMsg && state.editMsg[key]) || null;
+  const pend = state.settingPending;
+  const pendNote = (key) => (pend && pend.key === key && d.epoch != null && pend.epoch === d.epoch ? pend.msg || PENDING_NOTE : null);
+  const rowMsg = (key, extra) => {
+    const m = msgOf(key) || extra || null, n = m ? null : pendNote(key);
+    return m || n ? (
+      <div key={"msg:" + key} className={edLine} data-pw-edmsg={key} style={{ marginTop: 1 }}><span style={m ? edMsg : edNote}>{m || n}</span></div>
+    ) : null;
+  };
+  const srow = (key, label, body, hint, extraMsg) => (
+    <div key={"s:" + key} data-pw-edsetting={key}>
+      <div className={edLine}><span style={edDim}>{label}</span>{body}</div>
+      {hints && hint ? <div className={edHint}>{hint}</div> : null}
+      {rowMsg(key, extraMsg)}
+    </div>
+  );
+  const save = (key, value, after) => {
+    const v = String(value);
+    if (edSent[key] === v) return;
+    edSent[key] = v;
+    dispatch({ type: "EDIT_MSG", key: key, msg: null });
+    saveSetting(key, v, dispatch).then((r) => { edSent[key] = null; if (r && r.ok && after) after(r); });
+  };
+  const pending = (key, msg) => () => dispatch({ type: "SETTING_PENDING", key: key, epoch: d.epoch, msg: msg });
+  const titleNow = typeof ui.title === "string" ? ui.title : (d.name || "");
+  const commitPfTitle = (ev) => {
+    const t = cleanTitle(ev.target.value);
+    if (ev.target.value !== t) ev.target.value = t;
+    if (t.toLowerCase() === "default") {              // set_setting's remove-word: it would reset the name, not save it
+      dispatch({ type: "EDIT_MSG", key: "title", msg: "'default' is reserved — pick another name" });
+      return;
+    }
+    if (t !== (titleNow === "portfolio" ? "" : titleNow)) save("title", t);   // "" = back to "portfolio"
+  };
+  const curNow = typeof ui.currency === "string" && ui.currency ? ui.currency : "auto";
+  const curCustom = curNow !== "auto" && CURRENCY_CHIPS.indexOf(curNow) < 0;
+  const saveCur = (v) => { dispatch({ type: "EDIT_CONFIRM", what: null }); save("currency", v, pending("currency", PENDING_NOTE)); };
+  const commitCur = (ev) => {
+    const raw = String(ev.target.value).trim();
+    if (!raw) return;
+    if (!/^[A-Za-z]{3}$/.test(raw)) {
+      dispatch({ type: "EDIT_MSG", key: "currency", msg: "currency must be a 3-letter code (EUR, GBP, SEK) or auto, got '" + raw + "'" });
+      return;
+    }
+    ev.target.value = raw.toUpperCase();
+    if (raw.toUpperCase() !== curNow) saveCur(raw.toUpperCase());
+  };
+  const btRaw = ui.backtestYears != null ? ui.backtestYears : d.backtestYears;
+  const btNow = HISTORY_ORDER.indexOf(String(btRaw)) >= 0 ? String(btRaw) : "5";
+  const saveBt = (v) => save("backtestYears", v,
+    pending("backtestYears", HISTORY_ORDER.indexOf(v) > HISTORY_ORDER.indexOf(btNow) ? PENDING_LONGER : PENDING_NOTE));
+  const benchNow = benchWantOf(state, d) || "auto";
+  const benchDef = benchDefault(d.currency);
+  const benchList = [];
+  benchGroupsFor(d.currency).forEach((g) => g.items.forEach((it) => { if (benchList.length < 6) benchList.push(it[0]); }));
+  const benchCustom = benchNow !== "auto" && benchNow !== "none" && benchList.indexOf(benchNow) < 0;
+  const benchLabel = (s) => (BENCH_NAME[s] ? BENCH_NAME[s] + " (" + s + ")" : s);
+  const pickIdx = (v) => { dispatch({ type: "EDIT_CONFIRM", what: null }); pickBench(v, !showBenchOf(state), dispatch); };
+  const commitBench = (ev) => {
+    const raw = String(ev.target.value).trim();
+    if (!raw || raw.toUpperCase() === benchNow) return;
+    submitBenchInput(raw, !showBenchOf(state), dispatch);
+  };
+  const alertsNow = typeof ui.alerts === "boolean" ? ui.alerts : d.alertsOn === true;
+  const thrNow = (key, dflt) => (isFin(ui[key]) ? ui[key] : dflt);
+  const thrCommit = (key, lo, hi, cur) => (ev) => {
+    const raw = String(ev.target.value).trim(), n = Number(raw);
+    if (!raw || raw.toLowerCase() === "default") {    // empty or the word: back to the default
+      ev.target.value = String(cur);                    // (the field re-keys when the value changes)
+      save(key, "default");
+      return;
+    }
+    if (!isFinite(n) || n < lo || n > hi) {
+      dispatch({ type: "EDIT_MSG", key: key, msg: "must be a number from " + lo + " to " + hi + " (%), or empty for the default — got '" + raw + "'" });
+      return;
+    }
+    if (n !== cur) save(key, raw);
+  };
+  const thrField = (key, lo, hi, cur) => (
+    <input key={key + ":" + cur} className={inputCss} style={edNum} defaultValue={String(cur)} inputMode="decimal" data-pw-edfield={key}
+      title={lo + "–" + hi + " % (Enter)"} onKeyDown={(ev) => { if (isEnter(ev)) thrCommit(key, lo, hi, cur)(ev); }} onBlur={thrCommit(key, lo, hi, cur)} />
+  );
+  const rbNow = typeof state.rebalWhole === "boolean" ? state.rebalWhole : typeof ui.rebalanceWhole === "boolean" ? ui.rebalanceWhole : null;
+  const portfolioBody = () => (
+    <div>
+      {srow("title", "portfolio name", [
+        <input key={"pt:" + titleNow} className={inputCss} style={edText} defaultValue={titleNow === "portfolio" ? "" : titleNow}
+          placeholder="portfolio" maxLength={40} data-pw-edfield="title" title="the portfolio's name (Enter to keep it)"
+          onKeyDown={(ev) => { if (isEnter(ev)) commitPfTitle(ev); }} onBlur={commitPfTitle} />,
+      ])}
+      {srow("currency", "currency", [
+        chip("auto (now " + (d.currency || "USD") + ")", curNow === "auto", () => saveCur("auto"), "your Mac's region decides", "cur:auto", { chip: "auto" }),
+      ].concat(CURRENCY_CHIPS.map((c) => chip(c, curNow === c, () => saveCur(c), undefined, "cur:" + c, { chip: c })),
+        [chip(curCustom ? curNow : "other…", curCustom || confirm === "cur:other",
+          () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "cur:other" ? null : "cur:other" }), "any 3-letter code, like SEK or JPY", "cur:other", { chip: "other" })],
+        curCustom || confirm === "cur:other" ? [
+          <input key={"cur:" + curNow} className={inputCss} style={edNum} defaultValue={curCustom ? curNow : ""} placeholder="SEK" maxLength={3}
+            data-pw-edfield="currency" title="a 3-letter code (Enter)" onKeyDown={(ev) => { if (isEnter(ev)) commitCur(ev); }} onBlur={commitCur} />,
+        ] : []),
+      "The money everything is shown in. auto = your Mac's region.")}
+      {srow("backtestYears", "history", HISTORY_ORDER.map((v) => chip(HISTORY_LABELS[v], btNow === v, () => saveBt(v), undefined, "bt:" + v, { chip: v })),
+        "How far back the graph and 'what if you had bought earlier' go. A longer history loads once and takes a few minutes.")}
+      {srow("benchmark", "compare with an index", [
+        chip("auto (" + (BENCH_NAME[benchDef] || benchDef) + " · " + benchDef + ")", benchNow === "auto", () => pickIdx("auto"),
+          "the usual index for your currency", "bench:auto", { chip: "auto" }),
+        chip("none", benchNow === "none", () => pickIdx("none"), "no index line", "bench:none", { chip: "none" }),
+      ].concat(benchList.map((s) => chip(benchLabel(s), benchNow === s, () => pickIdx(s), undefined, "bench:" + s, { chip: s })),
+        [chip(benchCustom ? benchLabel(benchNow) : "other…", benchCustom || confirm === "bench:other",
+          () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "bench:other" ? null : "bench:other" }), "any Yahoo symbol, like VOO or ^GSPC", "bench:other", { chip: "other" })],
+        benchCustom || confirm === "bench:other" ? [
+          <input key={"bench:" + benchNow} className={inputCss} style={{ width: 70, fontSize: 9.5, padding: "1px 4px", flex: "none" }}
+            defaultValue={benchCustom ? benchNow : ""} placeholder="VOO" data-pw-edfield="benchmark" title="a Yahoo symbol (Enter)"
+            onKeyDown={(ev) => { if (isEnter(ev)) commitBench(ev); }} onBlur={commitBench} />,
+        ] : []),
+      "the thin grey line on the graph, to compare against", state.benchMsg || null)}
+      {srow("news", "headlines", [
+        chip("on", newsOn(state), () => savePref("news", true, dispatch), undefined, "news:on", { chip: "true" }),
+        chip("off", !newsOn(state), () => savePref("news", false, dispatch), undefined, "news:off", { chip: "false" }),
+      ], "Loads headlines from Yahoo. Off = no news anywhere in the widget.")}
+      {srow("alerts", "big-move alerts", [
+        chip("on", alertsNow, () => save("alerts", "true", () => {
+          dispatch({ type: "EDIT_MSG", key: "alerts", msg: ALERTS_NOTE });
+          setTimeout(() => dispatch({ type: "EDIT_MSG", key: "alerts", msg: null }), 5000);
+        }), undefined, "al:on", { chip: "true" }),
+        chip("off", !alertsNow, () => save("alerts", "false"), undefined, "al:off", { chip: "false" }),
+      ], "Shows a Mac notification, at most once per stock a day.")}
+      {alertsNow ? srow("alertThreshold", "a holding moves more than", [thrField("alertThreshold", 0.5, 50, thrNow("alertThreshold", 5)),
+        <span key="pc" style={edDim}>%</span>]) : null}
+      {alertsNow ? srow("portfolioAlertThreshold", "the portfolio moves more than", [thrField("portfolioAlertThreshold", 0.1, 50, thrNow("portfolioAlertThreshold", 2.5)),
+        <span key="pc" style={edDim}>%</span>]) : null}
+      {srow("rebalanceWhole", "rebalancing suggests", [
+        chip("whole shares only", rbNow === true, () => saveRebalWhole(true, dispatch), undefined, "rb:true", { chip: "true" }),
+        chip("fractions of a share", rbNow === false, () => saveRebalWhole(false, dispatch), undefined, "rb:false", { chip: "false" }),
+        chip("let the widget choose", rbNow === null, () => saveRebalWhole(null, dispatch), "whole shares when every holding is a whole number of shares", "rb:default", { chip: "default" }),
+      ], "how the rebalance panel rounds its buy / sell amounts")}
+      <div className={edHint} style={{ marginTop: 4 }}>Target share of each holding (for rebalancing): still edited in the positions file — see README.</div>
+    </div>
+  );
+
+  // ---- this window: name, one line, size presets / width / height / zoom,
+  // the carousel, new / duplicate / remove / reset
   const commitTitle = (ev) => {
     const t = cleanTitle(ev.target.value);
     if (ev.target.value !== t) ev.target.value = t;
     if (t !== (dw.title || "")) setWin({ title: t || undefined });
   };
-  const winBody = () => (
-    <div>
-      <div className={edLine}>
-        <span style={edDim}>title</span>
-        <input className={inputCss} style={{ flex: "1 1 80px", minWidth: 0, fontSize: 9, padding: "1px 4px" }}
-          key={"title:" + (dw.title || "")} defaultValue={dw.title || ""} placeholder={d.name || "portfolio"} maxLength={40}
-          title="the window's name (Enter to keep it; empty = the portfolio's name)"
-          onKeyDown={(ev) => { if (isEnter(ev)) commitTitle(ev); }} onBlur={commitTitle} />
-      </div>
-      <div className={edLine}>
-        {base.windows.length < MAX_WINDOWS
-          ? chip("+ new window ▾", confirm === "new", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "new" ? null : "new" }),
-            "another window on the desktop, from a template")
-          : <span style={edDim}>{MAX_WINDOWS + " windows (the most)"}</span>}
-        {base.windows.length < MAX_WINDOWS ? chip("duplicate", false, () => addWindow(base, dw,
-          Object.assign({}, dw, { title: cleanTitle(nameOf(dw) + " copy") }), dispatch), "a copy of this window") : null}
-        {chip("one line", dw.compact === true, () => setWin({ compact: dw.compact === true ? undefined : true }),
-          "just the title, value and today's change (also: click the title)")}
-        {base.windows.length > 1
-          ? chip("delete", confirm === "delete", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "delete" ? null : "delete" }), "remove this window")
-          : null}
-      </div>
-      {confirm === "new" ? (
-        <div className={edLine} data-pw-edmenu="new">
-          <span style={edDim}>start from:</span>
-          {TEMPLATES.map((t) => chip(t.label, false, () => {
-            dispatch({ type: "EDIT_CONFIRM", what: null });
-            addWindow(base, dw, fromTemplate(t), dispatch);
-            if (t.news && !newsOn(state)) savePref("news", true, dispatch);
-          }, t.tip, "tpl:" + t.key))}
-        </div>
-      ) : null}
-      {confirm === "delete" && base.windows.length > 1 ? (
-        <div className={edLine}>
-          <span style={{ color: C.down, minWidth: 0 }}>{"delete “" + nameOf(dw) + "”?"}</span>
-          {chip("yes, delete", false, () => put({ windows: others }), undefined, "del:yes")}
-          {chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "del:no")}
-        </div>
-      ) : null}
-      <div className={edLine}>
-        {confirm === "reset" ? (
-          <span style={{ color: C.down, minWidth: 0 }}>one window, default spot, size and zoom, everything shown?</span>
-        ) : null}
-        {confirm === "reset"
-          ? [chip("yes, reset", false, () => resetAllDisplay(dispatch), undefined, "reset:yes"),
-             chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "reset:no")]
-          : chip("reset everything", false, () => dispatch({ type: "EDIT_CONFIRM", what: "reset" }),
-            "back to the standard look: one window, every feature, the default spot, size and zoom")}
-      </div>
-    </div>
-  );
-
-  // ---- size: exact width / height, fit content, zoom, the carousel
   const wNow = G.g && isNumber(G.g.w) ? G.g.w : isNumber(dw.w) ? dw.w : WIDGET_W;
   const hNow = G.g && isNumber(G.g.h) ? G.g.h : isNumber(dw.h) ? dw.h : null;
   const zSaved = validScale(dw.zoom) || 1;
   const zNow = G.s;
+  const preset = hNow === null ? SIZE_PRESETS.find((p) => p[1] === wNow) : null;
+  const sizeCustom = !preset || confirm === "size:custom";
   // Enter / leaving the field: the number, clamped (the clamped one is shown)
   const commitNum = (lo, hi, cur, apply, empty) => (ev) => {
     const t = ev.target, raw = String(t.value).trim();
@@ -4806,28 +5034,53 @@ const editorNode = (state, dispatch, d, L, has) => {
     if (z === zSaved && !(G.win.legacy && z !== scaleOf(state))) return dispatch({ type: "GEO", geo: null });
     setWin({ zoom: z === 1 ? undefined : z });
   };
-  const sizeBody = () => (
+  const winBody = () => (
     <div>
       <div className={edLine}>
-        <span style={edDim}>width</span>
-        <input className={inputCss} style={edNum} key={"w:" + wNow} defaultValue={String(wNow)} inputMode="numeric"
-          title={WIN_W_MIN + "–" + WIN_W_MAX + " px (Enter)"} data-pw-edfield="w"
-          onKeyDown={(ev) => { if (isEnter(ev)) onW(ev); }} onBlur={onW} />
-        <span style={edDim}>height</span>
-        <input className={inputCss} style={edNum} key={"h:" + hNow} defaultValue={hNow === null ? "" : String(hNow)} placeholder="auto" inputMode="numeric"
-          title={WIN_H_MIN + "–" + WIN_H_MAX + " px (Enter), empty = fit content"} data-pw-edfield="h"
-          onKeyDown={(ev) => { if (isEnter(ev)) onH(ev); }} onBlur={onH} />
-        {chip((hNow === null ? "☑" : "☐") + " fit content", hNow === null, (ev) => setWin({
-          h: hNow === null ? clampInt(realH(ev) || (L && isNumber(L.T) ? L.T + LAYOUT_K.CHROME : 400), WIN_H_MIN, WIN_H_MAX) : undefined,
-        }), "as tall as its content (a fixed height folds panels that don't fit)", "fit")}
+        <span style={edDim}>window name</span>
+        <input className={inputCss} style={edText}
+          key={"title:" + (dw.title || "")} defaultValue={dw.title || ""} placeholder={pfName} maxLength={40}
+          title="this window's name (Enter to keep it)"
+          onKeyDown={(ev) => { if (isEnter(ev)) commitTitle(ev); }} onBlur={commitTitle} />
+      </div>
+      {hints ? <div className={edHint}>empty = the portfolio's name</div> : null}
+      <div className={edLine}>
+        {chip((dw.compact === true ? "☑ " : "☐ ") + "collapse to one line", dw.compact === true, () => setWin({ compact: dw.compact === true ? undefined : true }),
+          "just the name, value and today's change — or click the title", "compact")}
       </div>
       <div className={edLine}>
+        <span style={edDim}>size</span>
+        {SIZE_PRESETS.map((p) => chip(p[0] + " (" + p[1] + ")", !sizeCustom && preset === p, () => {
+          dispatch({ type: "EDIT_CONFIRM", what: null });
+          setWin({ w: p[1] === WIDGET_W ? undefined : p[1], h: undefined });
+        }, p[1] + " px wide, as tall as its content", "size:" + p[0], { chip: p[0] }))}
+        {chip("custom", sizeCustom, () => dispatch({ type: "EDIT_CONFIRM", what: sizeCustom ? null : "size:custom" }),
+          "type the width and height", "size:custom", { chip: "custom" })}
+      </div>
+      {sizeCustom ? (
+        <div className={edLine}>
+          <span style={edDim}>width</span>
+          <input className={inputCss} style={edNum} key={"w:" + wNow} defaultValue={String(wNow)} inputMode="numeric"
+            title={WIN_W_MIN + "–" + WIN_W_MAX + " px (Enter)"} data-pw-edfield="w"
+            onKeyDown={(ev) => { if (isEnter(ev)) onW(ev); }} onBlur={onW} />
+          <span style={edDim}>height</span>
+          <input className={inputCss} style={edNum} key={"h:" + hNow} defaultValue={hNow === null ? "" : String(hNow)} placeholder="auto" inputMode="numeric"
+            title={WIN_H_MIN + "–" + WIN_H_MAX + " px (Enter), empty = as tall as its content"} data-pw-edfield="h"
+            onKeyDown={(ev) => { if (isEnter(ev)) onH(ev); }} onBlur={onH} />
+          {chip((hNow === null ? "☑" : "☐") + " shrink to fit", hNow === null, (ev) => setWin({
+            h: hNow === null ? clampInt(realH(ev) || (L && isNumber(L.T) ? L.T + LAYOUT_K.CHROME : 400), WIN_H_MIN, WIN_H_MAX) : undefined,
+          }), "as tall as its content (a fixed height hides panels that don't fit)", "fit")}
+        </div>
+      ) : null}
+      <div className={edLine}>
         <span style={edDim}>zoom</span>
+        <span style={edDim}>smaller</span>
         <input type="range" min="60" max="160" step="5" key={"z:" + zSaved} defaultValue={String(Math.round(zSaved * 100))}
-          style={{ flex: "1 1 80px", minWidth: 50, maxWidth: 180, margin: 0 }} data-pw-edfield="zoom"
-          title="zoom: everything bigger or smaller (the width and height stay in unzoomed px)"
+          style={{ flex: "1 1 60px", minWidth: 50, maxWidth: 180, margin: 0 }} data-pw-edfield="zoom"
+          title="everything in this window bigger or smaller"
           onChange={(ev) => dispatch({ type: "GEO", geo: Object.assign({}, G.g || {}, { id: id, zoom: Number(ev.target.value) / 100 }) })}
           onMouseUp={zoomCommit} onKeyUp={zoomCommit} onTouchEnd={zoomCommit} />
+        <span style={edDim}>bigger</span>
         <span style={edDim}>{Math.round(zNow * 100) + " %"}</span>
       </div>
       <div className={edLine}>
@@ -4835,11 +5088,62 @@ const editorNode = (state, dispatch, d, L, has) => {
         {chip("rotate", dw.carousel !== "stack", () => setWin({ carousel: undefined }), "today · sectors · risk · days take turns", "car:rotate")}
         {chip("stack", dw.carousel === "stack", () => setWin({ carousel: "stack" }), "all of them, one under the other", "car:stack")}
       </div>
+      <div className={edLine}>
+        {base.windows.length < MAX_WINDOWS
+          ? chip("+ new window ▾", confirm === "new", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "new" ? null : "new" }),
+            "another window on the desktop, from a template")
+          : <span style={edDim}>{MAX_WINDOWS + " windows (the most)"}</span>}
+        {base.windows.length < MAX_WINDOWS ? chip("duplicate this window", false, () => addWindow(base, dw,
+          Object.assign({}, dw, { title: cleanTitle(nameOf(dw) + " copy") }), dispatch), "a copy of this window, beside it") : null}
+        {base.windows.length > 1
+          ? chip("remove this window", confirm === "delete", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "delete" ? null : "delete" }), "close and forget this window")
+          : null}
+      </div>
+      {confirm === "new" ? (
+        <div data-pw-edmenu="new">
+          {TEMPLATES.map((t) => (
+            <div key={"tpl:" + t.key} className={edLine} style={{ marginTop: 2 }}>
+              {chip(t.label, false, () => {
+                dispatch({ type: "EDIT_CONFIRM", what: null });
+                addWindow(base, dw, fromTemplate(t), dispatch);
+                if (t.news && !newsOn(state)) savePref("news", true, dispatch);
+              }, t.tip, "tpl:" + t.key)}
+              <span style={edNote}>{t.desc}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {confirm === "delete" && base.windows.length > 1 ? (
+        <div className={edLine}>
+          <span style={{ color: C.down, minWidth: 0 }}>{"remove “" + nameOf(dw) + "”?"}</span>
+          {chip("yes, remove it", false, () => put({ windows: others }), undefined, "del:yes")}
+          {chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "del:no")}
+        </div>
+      ) : null}
+      <div className={edLine}>
+        {confirm === "resetwin" ? (
+          <span style={{ color: C.down, minWidth: 0 }}>this window back to the standard size, zoom and content?</span>
+        ) : null}
+        {confirm === "resetwin"
+          ? [chip("yes, reset it", false, () => { dispatch({ type: "EDIT_CONFIRM", what: null }); setWin({ w: undefined, h: undefined, zoom: undefined,
+              items: undefined, prio: undefined, side: undefined, compact: undefined, carousel: undefined, news: undefined }); }, undefined, "rw:yes"),
+             chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "rw:no")]
+          : chip("reset this window", false, () => dispatch({ type: "EDIT_CONFIRM", what: "resetwin" }),
+            "the standard size, zoom and content; it keeps its name and place")}
+        {confirm === "reset" ? (
+          <span style={{ color: C.down, minWidth: 0 }}>one window, default spot, size and zoom, everything shown?</span>
+        ) : null}
+        {confirm === "reset"
+          ? [chip("yes, reset all", false, () => resetAllDisplay(dispatch), undefined, "reset:yes"),
+             chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "reset:no")]
+          : chip("reset all windows", false, () => dispatch({ type: "EDIT_CONFIRM", what: "reset" }),
+            "back to the standard look: one window, everything shown, the default spot, size and zoom")}
+      </div>
     </div>
   );
 
-  // ---- features: a switch per id, chips for the range tabs and the modes,
-  // priority / order / side / "→ window" for the ones that are shown
+  // ---- what it shows: a tick per feature, chips for the range tabs and the
+  // modes; with "arrange" on: priority / order / column / "move to another window"
   const toggle = (fid) => () => {
     const on = !set[fid];
     setWin({ items: toggleItem(dw, fid, on) });
@@ -4849,35 +5153,38 @@ const editorNode = (state, dispatch, d, L, has) => {
     <div key={"chips:" + label} className={edLine} style={{ width: "100%", paddingLeft: depth * 10, boxSizing: "border-box" }}>
       <span style={edDim}>{label}</span>
       {ids.map((fid) => chip(FEATURE_BY[fid].label, set[fid] === true, toggle(fid),
-        (set[fid] ? "shown — click to hide" : "hidden — click to show"), fid))}
+        FEATURE_BY[fid].tip + (set[fid] ? " — shown, click to hide" : " — hidden, click to show"), fid))}
     </div>
   );
   const featureRow = (f) => {
     const fid = f.id, inIt = set[fid] === true, live = enabled(dw, fid);
     const parentOn = !f.parent || enabled(dw, f.parent);
-    const note = !live ? "" : L && L.folded.indexOf(fid) >= 0 ? "(folded — no room)"
-      : has && has[fid] === false && fid !== "panel.news" ? "(nothing yet)" : "";
-    const prio = live && f.p ? (dw.prio && dw.prio[fid]) || f.p : null;
-    const panelCtl = live && f.kind === "panel";
-    const movable = inIt && !f.parent && f.kind !== "cell" && others.length > 0;
+    const note = !live ? "" : L && L.folded.indexOf(fid) >= 0 ? "(hidden — window too short)"
+      : has && has[fid] === false && fid !== "panel.news" ? "(no data yet)" : "";
+    const prio = adv && live && f.p ? (dw.prio && dw.prio[fid]) || f.p : null;
+    const panelCtl = adv && live && f.kind === "panel";
+    const movable = adv && inIt && !f.parent && f.kind !== "cell" && others.length > 0;
     return (
       <div key={fid} className={edLine} data-pw-feature={fid}
         style={{ width: half ? "50%" : "100%", boxSizing: "border-box", paddingLeft: depthOf(fid) * 10,
           paddingRight: half ? 8 : 0, opacity: parentOn ? 1 : 0.5 }}>
-        <span style={edLabel} onClick={toggle(fid)} title={inIt ? "shown — click to hide" : "hidden — click to show"}>
+        <span style={edLabel} onClick={toggle(fid)} title={(f.tip || f.label) + (inIt ? " — shown, click to hide" : " — hidden, click to show")}>
           {(inIt ? "☑ " : "☐ ") + f.label}
         </span>
         {note ? <span style={edDim}>{note}</span> : null}
         {fid === "panel.news" && inIt ? (newsOn(state) ? <span style={edDim}>headlines on</span>
-          : chip("headlines off · turn on", false, () => savePref("news", true, dispatch), "_settings.news: headlines from Yahoo", "news:on")) : null}
-        {prio ? ["always", "normal", "room"].map((p) => chip(p, prio === p,
-          () => setWin({ prio: withChoice(dw.prio, fid, p, f.p) }), PRIO_TIPS[p], "prio:" + p)) : null}
-        {panelCtl ? chip("↑", false, () => { const it = shiftPanel(dw, fid, -1); if (it) setWin({ items: it }); }, "earlier in its column", "up") : null}
-        {panelCtl ? chip("↓", false, () => { const it = shiftPanel(dw, fid, 1); if (it) setWin({ items: it }); }, "later in its column", "down") : null}
-        {panelCtl ? chip("a⇄b", false, () => setWin({ side: withChoice(dw.side, fid, edSideOf(dw, fid) === "a" ? "b" : "a", f.side) }),
-          "column: now " + (edSideOf(dw, fid) === "a" ? "a (left)" : "b (right)") + " — click to switch", "side") : null}
-        {movable ? chip("→ window ▾", confirm === "move:" + fid,
-          () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "move:" + fid ? null : "move:" + fid }), "move it to another window", "move") : null}
+          : chip("headlines off · turn on", false, () => savePref("news", true, dispatch), "headlines from Yahoo (Portfolio → headlines)", "news:on")) : null}
+        {prio ? ["always", "normal", "room"].map((p) => chip(PRIO_LABELS[p], prio === p,
+          () => setWin({ prio: withChoice(dw.prio, fid, p, f.p) }), PRIO_TIPS[p], "prio:" + p, { prio: p })) : null}
+        {inIt && f.kind === "panel" && !(FEATURE_BY[fid].car && dw.carousel !== "stack") ? chip("to top", false,
+          () => { const it = topPanel(dw, fid); if (it) setWin({ items: it }); }, "show this first in its column", "top", { ctl: "top" }) : null}
+        {panelCtl ? chip("↑", false, () => { const it = shiftPanel(dw, fid, -1); if (it) setWin({ items: it }); }, "earlier", "up", { ctl: "up" }) : null}
+        {panelCtl ? chip("↓", false, () => { const it = shiftPanel(dw, fid, 1); if (it) setWin({ items: it }); }, "later", "down", { ctl: "down" }) : null}
+        {panelCtl ? chip(edSideOf(dw, fid) === "a" ? "left column" : "right column", false,
+          () => setWin({ side: withChoice(dw.side, fid, edSideOf(dw, fid) === "a" ? "b" : "a", f.side) }),
+          "now in the " + (edSideOf(dw, fid) === "a" ? "left" : "right") + " column — click to move it to the other", "side", { ctl: "side" }) : null}
+        {movable ? chip("move to another window ▾", confirm === "move:" + fid,
+          () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "move:" + fid ? null : "move:" + fid }), "take it out of this window and into another", "move", { ctl: "move" }) : null}
         {movable && confirm === "move:" + fid ? others.map((w) => chip("→ " + nameOf(w), false, () => {
           dispatch({ type: "EDIT_CONFIRM", what: null });
           put(moveFeature(base, id, w.id, fid));
@@ -4958,26 +5265,36 @@ const editorNode = (state, dispatch, d, L, has) => {
     });
     return <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline" }}>{out}</div>;
   };
-  const countOn = (key) => {
-    const ids = FEATURES.filter((f) => editGroupOf(f.id) === key);
-    return ids.filter((f) => set[f.id]).length + "/" + ids.length;
-  };
+  // the head says how many are unticked, only when some are
+  const countOff = (key) => FEATURES.filter((f) => editGroupOf(f.id) === key && !set[f.id]).length;
+  const groupLabel = (g) => g[1] + (countOff(g[0]) ? " · " + countOff(g[0]) + " off" : "");
+  const pfHead = "Portfolio · " + (d.currency || "auto") + " · " + HISTORY_LABELS[btNow];
+  const winHead = "This window" + (base.windows.length > 1 ? " · " + base.windows.length + " open" : "")
+    + " · " + G.Wu + " × " + (isNumber(G.Hu) ? G.Hu : "fit");
 
   return (
     <div className={edBox} data-pw-editor={id}>
-      <div className={rowFlex} style={{ alignItems: "baseline" }}>
-        <span className={eyebrow} style={edLabel}>{"⚙ " + nameOf(dw)}</span>
+      <div className={rowFlex} style={{ alignItems: "baseline", columnGap: 6 }}>
+        <span style={Object.assign({ flex: "1 1 auto", color: C.ink }, edLabel)} title="settings: the portfolio, this window and what it shows">{"⚙ Settings · " + nameOf(dw)}</span>
+        {chip(hints ? "hide hints" : "show hints", false, () => dispatch({ type: "EDIT_HINTS", on: !hints }),
+          "the one-line explanations under each section", "hints", { hints: hints ? "1" : "0" })}
         <span className={edChip} style={{ fontSize: 10 }} title="close (Esc)" data-pw-edclose="1"
           onClick={() => dispatch({ type: "CLOSE_EDITOR" })}>×</span>
       </div>
-      {group("window", "window" + (base.windows.length > 1 ? " · " + base.windows.length + " open" : ""), winBody)}
-      {group("size", "size · " + G.Wu + " × " + (isNumber(G.Hu) ? G.Hu : "fit"), sizeBody)}
-      {EDIT_FEATURE_GROUPS.map((g) => group(g[0], g[1] + " · " + countOn(g[0]), featureBody(g[0])))}
+      {group("portfolio", pfHead, portfolioBody, "the whole portfolio's settings — shared by every window")}
+      {group("window", winHead, winBody, "this window's name, place and size")}
+      <div className={edCaption}>
+        <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          title="tick what this window shows">What it shows</span>
+        {chip(adv ? "arrange ▾" : "arrange ▸", adv, () => dispatch({ type: "EDIT_ADVANCED", on: !adv }),
+          "order, columns, what hides first, move to another window", "adv", { adv: adv ? "1" : "0" })}
+      </div>
+      {hints ? <div className={edHint}>{adv ? EDIT_HINTS.arrange : EDIT_HINTS.arrangeOff}</div> : null}
+      {EDIT_FEATURE_GROUPS.map((g) => group(g[0], groupLabel(g), featureBody(g[0]), EDIT_HEAD_TIPS[g[0]]))}
     </div>
   );
 };
-
-const winTitle = (state, d) => (state._win && state._win.title) || d.name || "portfolio";
+const winTitle = (state, d) => (state._win && state._win.title) || uiPrefs(state).title || d.name || "portfolio";
 const compactRow = (state, dispatch, d, env) => {
   const totals = d.totals || {};
   const dc = isFin(totals.dayChange) ? totals.dayChange : 0;
@@ -5312,6 +5629,7 @@ const renderWin = (state, dispatch) => {
             // index starts later than the graph
             lead: (j0 > 0 ? "since " + fmtDayY(P[j0].t) + ": " : "") + "you " + f1(a) + " · " + sym + " " + f1(b) + " · ",
             verdict: diff > 0 ? "beat by " + diff.toFixed(1) + " pts" : diff < 0 ? "behind by " + Math.abs(diff).toFixed(1) + " pts" : "even with " + sym,
+            short: diff === 0 ? "even" : null,          // a narrow window: the symbol is already in the lead
             diff: diff,
           };
         }
@@ -5730,7 +6048,7 @@ const renderWin = (state, dispatch) => {
       ) : null}
       {L.hint ? (
         <div className={css`${mono} font-size: 8px; color: ${C.dim}; margin-top: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`}
-          data-pw-hint="1" title={"hidden for lack of room: " + L.folded.map((id) => (FEATURE_BY[id] ? FEATURE_BY[id].label : id)).join(", ") +
+          data-pw-hint="1" title={"hidden because the window is too short: " + L.folded.map((id) => (FEATURE_BY[id] ? FEATURE_BY[id].label : id)).join(", ") +
             "\nmake the window taller, or change what it shows with ⚙"}
           onClick={() => dispatch({ type: "TOGGLE_EDITOR", group: editGroupOf(L.folded[0]) })}>{"+" + L.folded.length + " hidden — ⚙"}</div>
       ) : null}
@@ -6510,7 +6828,7 @@ const renderWin = (state, dispatch) => {
                 " (prices only — dividends left out on both sides)" + (bench.stale ? "\nits latest price is stale" : "") +
                 (benchCtl ? "\npick another index with \"index ▾\"" : bench.source === "setting" ? "\nset with _settings.benchmark"
                   : "\nthe default for " + d.currency + " — change it with _settings.benchmark (\"none\" hides it)")}>
-                {benchCap.lead}<span style={{ color: benchCap.diff ? upDown(benchCap.diff) : C.dim }}>{benchCap.verdict}</span>
+                {benchCap.lead}<span style={{ color: benchCap.diff ? upDown(benchCap.diff) : C.dim }}>{G.Wu < 400 && benchCap.short ? benchCap.short : benchCap.verdict}</span>
               </span>
             ) : null}
             {benchNote ? (

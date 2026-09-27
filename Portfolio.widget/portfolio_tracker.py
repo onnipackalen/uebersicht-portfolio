@@ -435,7 +435,30 @@ def ui_settings(path, settings):
             # the one-line view (a click on the title, 12.11)
             "compact": now.get("compact") is True,
             # the windows and their features (12.12); None = the one default
-            "display": display_prefs.clean_display(now.get("display"))}
+            "display": display_prefs.clean_display(now.get("display")),
+            # the portfolio settings the editor's Portfolio group shows (13.2):
+            # as saved, so a value set_setting.py just wrote survives a refresh
+            "title": now["title"] if isinstance(now.get("title"), str) and now["title"].strip() else "portfolio",
+            "currency": ui_currency(now.get("currency")),
+            "backtestYears": backtest_years(now.get("backtestYears")),
+            "alerts": now.get("alerts") is True,
+            "alertThreshold": ui_number(now.get("alertThreshold"), 5),
+            "portfolioAlertThreshold": ui_number(now.get("portfolioAlertThreshold"), 2.5)}
+
+
+def ui_currency(value):
+    """_settings.currency as saved: a 3-letter code upper-cased, else "auto"."""
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z]{3}", value.strip()):
+        return value.strip().upper()
+    return "auto"
+
+
+def ui_number(value, default):
+    """A finite number as saved (whole numbers as int, like set_setting.py
+    stores them), else the default."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return int(value) if value == int(value) else value
 
 
 def benchmark_choice(value):

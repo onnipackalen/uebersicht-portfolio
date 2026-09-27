@@ -24,25 +24,49 @@ set_setting.py — save one of the widget's display choices in positions.json
     python3 set_setting.py display reset-all     # display, position, scale,
                                                  # graphBig, showBenchmark and
                                                  # compact all back to default
+    python3 set_setting.py -- title "My money"   # the portfolio's name (13.2
+                                                 # ⚙ → Portfolio); "" or
+                                                 # default = "portfolio"
+    python3 set_setting.py currency eur          # the money it is shown in
+                                                 # (saved EUR); auto = the
+                                                 # Mac's region
+    python3 set_setting.py backtestYears max     # history: 3, 5, 10 or max
+    python3 set_setting.py alerts true           # big-move notifications
+    python3 set_setting.py alertThreshold 7.5    # ... a holding moves more
+                                                 # than this % (0.5-50)
+    python3 set_setting.py portfolioAlertThreshold 1
+                                                 # ... the portfolio moves
+                                                 # more than this % (0.1-50)
+    python3 set_setting.py rebalanceWhole default
+                                                 # let the widget choose
 
 Only these keys, stored under "_settings": showBenchmark, graphBig, compact,
-news and rebalanceWhole as true / false, position as {"x": int, "y": int}
-(clamped to sane ranges; "default" removes it), scale as a number 0.6-1.6
-("default" removes it), benchmark as "auto", "none" or a Yahoo symbol
-(upper-cased), display as the JSON object display_prefs.py checks (its
-text is not lower-cased; "default" removes it, "reset-all" removes it and
-position, scale, graphBig, showBenchmark and compact in one write). A
-benchmark change needs the new index's prices, so it also writes
-.cache/refresh.request (only when it changed): the widget's next refresh
-fetches them. So does a display change whose news page (13.1,
+news, rebalanceWhole and alerts as true / false, position as {"x": int,
+"y": int} (clamped to sane ranges; "default" removes it), scale as a number
+0.6-1.6 ("default" removes it), benchmark as "auto", "none" or a Yahoo
+symbol (upper-cased), display as the JSON object display_prefs.py checks
+(its text is not lower-cased; "default" removes it, "reset-all" removes it
+and position, scale, graphBig, showBenchmark and compact in one write).
+The portfolio's own settings (13.2, the ⚙ editor's Portfolio group):
+title as the text given (not lower-cased; trimmed, 1-40 characters, no
+line breaks; "" or "default" removes it), currency as a 3-letter code
+(upper-cased; "auto" or "default" removes it), backtestYears as 3, 5, 10
+or "max" ("default" removes it), alertThreshold as a number 0.5-50 and
+portfolioAlertThreshold as 0.1-50 (2 decimals; "default" removes them),
+alerts and rebalanceWhole also take "default" (removed). Every key is
+optional in positions.json: an old file keeps working. What "default"
+shows in data.json's "ui" is UI_DEFAULT below.
+A benchmark, currency or backtestYears change needs new data, so it also
+writes .cache/refresh.request (only when it changed): the widget's next
+refresh fetches it. So does a display change whose news page (13.1,
 display_prefs.news_plan) asks for headlines the tracker did not plan
 before: a new scope, or a picked ticker without a fresh .cache/news.json
 entry — at most one such request per NEWS_REQUEST_GAP seconds (the mtime
 of .cache/news.request); per, sort, span, group, dense, sources, mute, q
-and removals never ask for one.
+and removals never ask for one. No other key asks for a refresh.
 Prints one line of JSON and nothing else: {"ok": true, "key": ...,
-"value": ...} or {"error": "..."}. Standard library only, so any python3
-can run it.
+"value": ...} (the value as data.json's "ui" shows it) or {"error": "..."}
+with exit 1. Standard library only, so any python3 (3.9+) can run it.
 """
 
 import argparse
@@ -58,7 +82,10 @@ import display_prefs
 import portfolio_file as pf
 
 KEYS = ("showBenchmark", "graphBig", "compact", "position", "scale", "news",
-        "rebalanceWhole", "benchmark", "display")
+        "rebalanceWhole", "benchmark", "display",
+        # 13.2: the portfolio's own settings
+        "title", "currency", "backtestYears", "alerts", "alertThreshold",
+        "portfolioAlertThreshold")
 TRUE = ("true", "1", "on", "yes")
 FALSE = ("false", "0", "off", "no")
 DEFAULT = ("default", "reset", "none")
@@ -66,8 +93,16 @@ POS_RE = re.compile(r"^(-?\d{1,6}),(-?\d{1,6})$")
 X_RANGE = (-10000, 20000)      # screen pixels; the widget keeps 60 px on screen
 Y_RANGE = (0, 20000)           # never above the top: the header is the handle
 SCALE_RANGE = (0.6, 1.6)
-# what data.json's "ui" shows for a key with nothing saved
-UI_DEFAULT = {"position": None, "scale": 1, "display": None}
+CURRENCY_RE = re.compile(r"^[a-z]{3}$")       # matched after lower-casing
+BACKTEST_YEARS = {"3": 3, "5": 5, "10": 10, "max": "max"}
+# the two alert thresholds (% moves): (low, high) and the message's words
+THRESHOLD_RANGE = {"alertThreshold": (0.5, 50), "portfolioAlertThreshold": (0.1, 50)}
+# what data.json's "ui" shows for a key with nothing saved (the tracker's
+# defaults: portfolio_tracker.DEFAULT_SETTINGS / ui_settings)
+UI_DEFAULT = {"position": None, "scale": 1, "display": None,
+              "title": "portfolio", "currency": "auto", "backtestYears": 5,
+              "alerts": False, "alertThreshold": 5, "portfolioAlertThreshold": 2.5,
+              "rebalanceWhole": None}
 # "display reset-all": these keys leave _settings, data.json's "ui" gets
 # these values (the tracker's defaults) — one write each
 RESET_ALL = (("display", None), ("position", None), ("scale", 1),
@@ -88,8 +123,25 @@ class JsonArgs(argparse.ArgumentParser):
         reply({"error": message}, 1)
 
 
+NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+
+
 def clamp(v, lo_hi):
     return max(lo_hi[0], min(lo_hi[1], v))
+
+
+def parse_number(text, lo_hi):
+    """text as a number inside (lo, hi), rounded to 2 decimals (an int when
+    whole), or None (also for NaN, inf and words)."""
+    # plain decimals only: float() would also take Python spellings such as
+    # "1_0" or "nan", which the widget's Number() rejects
+    if not NUMBER_RE.match(text):
+        return None
+    num = float(text)
+    if not (lo_hi[0] <= num <= lo_hi[1]):      # also NaN, inf
+        return None
+    num = round(num, 2)
+    return int(num) if num == int(num) else num
 
 
 def parse_value(key, value):
@@ -98,7 +150,39 @@ def parse_value(key, value):
     if key == "display":
         # before lower-casing: feature ids have capitals
         return display_prefs.parse_display(str(value))
+    if key == "title":
+        # before lower-casing too: the name is kept as typed (trimmed like a
+        # window title: display_prefs._title)
+        raw = str(value)
+        if raw.strip() == "" or raw.strip() == "default":
+            return None, None
+        t = display_prefs._title(raw)
+        if t is None:
+            return None, "title must be 1–40 characters (no line breaks), got %r" % value
+        return t, None
     text = str(value).strip().lower()
+    if key == "currency":
+        if text in ("auto", "default"):
+            return None, None
+        if not CURRENCY_RE.match(text):
+            return None, "currency must be a 3-letter code (EUR, GBP, SEK) or auto, got %r" % value
+        return text.upper(), None
+    if key == "backtestYears":
+        if text == "default":
+            return None, None
+        if text not in BACKTEST_YEARS:
+            return None, "backtestYears must be 3, 5, 10 or max, got %r" % value
+        return BACKTEST_YEARS[text], None
+    if key in THRESHOLD_RANGE:
+        if text == "default":
+            return None, None
+        num = parse_number(text, THRESHOLD_RANGE[key])
+        if num is None:
+            return None, "%s must be a number from %s to %s or default, got %r" % (
+                key, THRESHOLD_RANGE[key][0], THRESHOLD_RANGE[key][1], value)
+        return num, None
+    if key in ("alerts", "rebalanceWhole") and text == "default":
+        return None, None
     if key == "benchmark":
         # auto = DEFAULT_BENCHMARKS for the home currency, none = no index
         # (no requests); else a symbol the tracker's SYMBOL_RE accepts
@@ -120,14 +204,10 @@ def parse_value(key, value):
     if key == "scale":
         if text in DEFAULT:
             return None, None
-        try:
-            num = float(text)
-        except ValueError:
-            num = float("nan")
-        if not (SCALE_RANGE[0] <= num <= SCALE_RANGE[1]):      # also NaN, inf
+        num = parse_number(text, SCALE_RANGE)
+        if num is None:
             return None, "scale must be a number from 0.6 to 1.6 or default, got %r" % value
-        num = round(num, 2)
-        return (int(num) if num == int(num) else num), None
+        return num, None
     if text not in TRUE + FALSE:
         return None, "%s must be true or false, got %r" % (key, value)
     return text in TRUE, None
@@ -282,9 +362,11 @@ def main():
         else:
             patch_cached_ui(args.positions, {
                 args.key: UI_DEFAULT.get(args.key) if value is None else value})
-        if args.key == "benchmark" and changed:
-            # new data needed (none for the choice already saved): one fetch with the new index (whose long
-            # history the history job then plans like any other)
+        if args.key in ("benchmark", "currency", "backtestYears") and changed:
+            # new data needed (none for the choice already saved): one fetch
+            # with the new index / in the new currency / over the longer
+            # history (whose long history the history job then plans like
+            # any other). No other key asks for one.
             pf.request_refresh(args.positions)
         if args.key == "display" and changed and value is not display_prefs.RESET:
             # a news page asking for headlines the tracker never planned

@@ -180,14 +180,20 @@ case "$1" in
     exec "$PY" "$helper" --positions "$POSITIONS" "$@" 2>&1
     ;;
   setting)
-    # a display choice made in the widget (showBenchmark / graphBig / compact /
-    # news / rebalanceWhole true|false, where it was dragged, its size, the index
-    # to compare with — that one also asks for a refresh — and display: the
-    # windows as JSON, default, or reset-all = every display choice back to
-    # default in one write) saved in
-    # _settings: standard library only,
-    # JSON on stdout and nothing else. "--": a position like -120,40 is a
-    # value, not an option
+    # a setting chosen in the widget, saved in _settings by set_setting.py:
+    # the display choices (showBenchmark / graphBig / compact / news /
+    # rebalanceWhole true|false|default, where it was dragged, its size, the
+    # index to compare with, and display: the windows as JSON, default, or
+    # reset-all = every display choice back to default in one write) and,
+    # since 13.2, the portfolio's own settings from ⚙ → Portfolio (title,
+    # currency, backtestYears, alerts, alertThreshold,
+    # portfolioAlertThreshold; "default" removes a key). The value is ONE
+    # argument ($3): spaces are allowed ("setting title 'My money'"), and
+    # the "--" keeps a negative number like a position -120,40 or a title
+    # starting with "-" a value, not an option. A benchmark, currency or
+    # backtestYears change also asks for a refresh. Standard library only,
+    # JSON on stdout and nothing else: {"ok": true, "key": ..., "value": ...}
+    # or {"error": "..."} (shown in the widget as it is)
     PY=$(find_python any) || { echo '{"error": "no python3 found"}'; exit 0; }
     out=$("$PY" "$SCRIPT_DIR/set_setting.py" --positions "$POSITIONS" -- "$2" "$3" 2>/dev/null)
     [ -n "$out" ] || out='{"error": "could not save the setting"}'
