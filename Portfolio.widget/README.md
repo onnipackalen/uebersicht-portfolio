@@ -39,9 +39,10 @@ alerts on big moves. Prices come from Yahoo Finance.
 ## Install
 
 1. Install [Übersicht](https://tracesof.net/uebersicht/).
-2. Download `Portfolio.widget.zip` from the releases page and unzip it into
-   your widgets folder (Übersicht menu → *Open Widgets Folder*). The folder must
-   be named **`Portfolio.widget`**.
+2. Download `Portfolio.widget.zip` from the
+   [releases page](https://github.com/onnipackalen/uebersicht-portfolio/releases/latest)
+   and unzip it into your widgets folder (Übersicht menu → *Open Widgets
+   Folder*). The folder must be named **`Portfolio.widget`**.
 3. Open Terminal and run the one-time setup, which installs the
    [yfinance](https://pypi.org/project/yfinance/) package into its own
    environment (`~/.portfolio-widget/venv`):
