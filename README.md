@@ -325,6 +325,7 @@ opens the editor at those options.
 | **layout**: dense | `dense` | `true` / `false` | `false` — one 14 px line per story instead of title + source line |
 | **layout**: group by ticker | `group` | `true` / `false` | `false` — a heading per ticker ("KO · +2.1% · 3") |
 | **layout**: source | `sources` | `true` / `false` | `true` — show the source and the time |
+| **market news**: CNBC · MarketWatch · Yahoo Finance · FT | `market` | any of `cnbc`, `marketwatch`, `yahoo`, `ft` | `[]` — the news page template turns on CNBC, MarketWatch and FT (Yahoo Finance's feed runs days behind) |
 | **muted**: one chip per hidden ticker, **unmute all** | `mute` | up to 40 symbols | `[]` |
 | **keyword** (read-only chip; typed in the panel) | `q` | up to 60 characters | `""` |
 
@@ -340,12 +341,22 @@ an active filter, mute list or time span. A story about several of your
 tickers is shown once with all of them. Default options are not saved: a news
 page with the defaults is `"news": {}`.
 
+**Market news** mixes the outlets' latest stories into the page (their public
+feeds, fetched every 15 minutes, nothing older than 3 days), tagged with the
+outlet's name; a tag click narrows the page to that outlet. WSJ's public
+feeds stopped updating in 2025, so they aren't offered. Yahoo's newest item
+for a thinly covered stock can be months old: the movers panel hides anything
+older than a week, and the template starts on "this week" (**since → all**
+shows everything).
+
 Requests: with a news page Yahoo is asked for the headlines of every held,
 watched or picked symbol in scope — not only today's movers — and so sees
 which symbols you follow (see Privacy). The tracker asks for one request per
 symbol per 30 minutes, at most 12 per refresh (4 at a time), so a page for
 60 holdings fills over about 5 refreshes (~25 minutes); with more than 72
-symbols in scope some are always waiting. Changing the options never causes
+symbols in scope some are always waiting. Each market feed is one plain
+request to that publisher every 15 minutes (no symbols, nothing about you;
+see Privacy). Changing the options never causes
 extra requests, except a new scope or a newly picked ticker (at most one such
 refresh per minute). A symbol Yahoo has no headlines for is retried after 10
 minutes, then every 30.
@@ -525,6 +536,9 @@ stock *has* moved, not a forecast.
   the holdings that moved more than 3% today; with a news page it is every
   symbol in that page's scope — all your holdings, the watchlist, or the
   tickers you picked.
+- With **market news** on, CNBC, MarketWatch, Yahoo Finance and/or FT get a
+  plain request for their public headline feed every 15 minutes — no
+  symbols, no account, nothing about your portfolio.
 - Sharing a screenshot shows your numbers; the demo portfolio is there for
   that.
 

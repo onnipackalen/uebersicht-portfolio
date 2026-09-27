@@ -1,5 +1,25 @@
 # Changelog
 
+## 13.3
+
+- **Market headlines**: the news page can mix in the latest stories from
+  **CNBC, MarketWatch and FT** (their public feeds, fetched every 15
+  minutes, nothing older than 3 days), and Yahoo Finance's own feed if you
+  want it (its dates run days behind, so it is off unless you turn it on).
+  Turn each on or off under **market news** in the news panel's options; the
+  "news page" template starts with CNBC, MarketWatch and FT on. Stories show
+  with the outlet as their tag; a tag click narrows the page to that outlet.
+  WSJ's public feeds stopped updating in 2025, so they aren't offered.
+- **No more month-old headlines**: the news panel (the one showing today's
+  movers) hides anything older than a week, and the news page template now
+  starts on "this week". Yahoo's newest item for a thinly covered stock can be
+  months old — it is still there under **since → all**, just not by default.
+- Privacy: with market news on, those publishers see a plain feed request
+  from your Mac every 15 minutes (no symbols, nothing about you).
+- Works with python.org's Python too: the feeds are fetched with certifi's
+  root certificates when they are installed (yfinance brings them), so
+  they don't fail with CERTIFICATE_VERIFY_FAILED.
+
 ## 13.2
 
 - **Friendlier settings**: the ⚙ editor now reads like a settings screen.

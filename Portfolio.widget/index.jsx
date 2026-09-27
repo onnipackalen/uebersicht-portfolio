@@ -40,7 +40,7 @@ const SORT_TIP = {
 // (that crashed the 12.x upgrade with "undefined is not an object"), so any
 // state not stamped with this version starts over, keeping only the data
 // that is already on screen. Bump it whenever the state's shape changes.
-const STATE_VERSION = "13.2";
+const STATE_VERSION = "13.3";
 
 // older day-by-day rows loaded on demand ("older ›", an old date typed in the
 // date box, a custom start before the newest ~400 days). `key` ties them to
@@ -330,7 +330,8 @@ const TEMPLATES = [
   { key: "news", label: "news & alerts", desc: "headlines and alerts, nothing else", items: HEAD2.concat(["panel.news", "panel.priceAlerts", "panel.alerts"]), w: 360, h: 420, news: true,
     tip: "today's movers' headlines, price alerts and alerts" },
   { key: "newspage", label: "news page", desc: "a tall page of headlines", items: HEAD2.concat(["panel.news"]), w: 480, h: 560, news: true,
-    newsCfg: { scope: "all", per: 5, sort: "new" }, tip: "headlines for every holding and the watchlist — turns headlines on" },
+    newsCfg: { scope: "all", per: 5, sort: "new", span: "week", market: ["cnbc", "marketwatch", "ft"] },
+    tip: "this week's headlines for every holding and the watchlist, plus CNBC, MarketWatch and FT — turns headlines on" },
   { key: "ticker", label: "ticker line", desc: "a small one-line ticker for the corner of the screen", items: HEAD2.slice(), compact: true, w: 420 },
   { key: "blank", label: "blank", desc: "an empty window — tick what it shows", items: [], w: 360, h: 200 },
 ];
@@ -359,7 +360,7 @@ const NEWS_SCOPES = ["movers", "holdings", "watch", "all", "pick"];
 const NEWS_SORTS = ["new", "move", "ticker"];
 const NEWS_SPANS = ["day", "3d", "week", "all"];
 const NEWS_LIST_MAX = 40, NEWS_Q_MAX = 60, NEWS_DENSE_TAGS = 3;   // dense rows show 3 tags + "+n"
-const NEWS_DEF = { scope: "movers", tickers: [], per: 3, sort: "move", span: "all", group: false, dense: false, sources: true, mute: [], q: "" };
+const NEWS_DEF = { market: [], scope: "movers", tickers: [], per: 3, sort: "move", span: "all", group: false, dense: false, sources: true, mute: [], q: "" };
 // control, format (soft hyphen, zero-width, bidi, BOM…) and private-use code points
 const NEWS_Q_BAD = /[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\ue000-\uf8ff]|\ud804[\udcbd\udccd]|\ud80d[\udc30-\udc3f]|\ud82f[\udca0-\udca3]|\ud834[\udd73-\udd7a]|\udb40[\udc01\udc20-\udc7f]|[\udb80-\udbff][\udc00-\udfff]/;
 const newsQOk = (q) => {
@@ -378,6 +379,12 @@ const newsList = (v) => {
 };
 // lenient like display_prefs.clean_display: a bad field is dropped, the rest
 // kept; null when `news` is not an object (then it is dropped)
+// market headlines (13.3): the tracker's NEWS_FEEDS, cached under "@<id>"
+const NEWS_FEEDS = { cnbc: "CNBC", marketwatch: "MarketWatch", yahoo: "Yahoo Finance", ft: "FT" };
+const NEWS_FEED_IDS = Object.keys(NEWS_FEEDS);
+const isFeedKey = (tk) => typeof tk === "string" && tk.charAt(0) === "@";
+const newsTagText = (tk) => (isFeedKey(tk) ? NEWS_FEEDS[tk.slice(1)] || tk.slice(1) : tk);
+const NEWS_STALE_S = 7 * 86400;   // the movers panel (no options) hides older headlines
 const normNews = (v) => {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const o = {};
@@ -393,6 +400,8 @@ const normNews = (v) => {
   const mu = newsList(v.mute);
   if (mu && mu.length) o.mute = mu;
   if (typeof v.q === "string" && v.q && newsQOk(v.q)) o.q = v.q;
+  const mk = Array.isArray(v.market) ? v.market.filter((x, i, a) => NEWS_FEED_IDS.indexOf(x) >= 0 && a.indexOf(x) === i) : null;
+  if (mk && mk.length) o.market = mk;
   return o;
 };
 // the options with the defaults filled in; null = the 13.0 path (no `news`)
@@ -3656,11 +3665,12 @@ const markNewsOf = (d, tk, move) => {
 // up to NEWS_KEEP headlines each
 const NEWS_KEEP = 3;
 const newsFeedOf = (d, state) => {
-  const out = [], seen = {};
+  const out = [], seen = {}, since = Date.now() / 1000 - NEWS_STALE_S;
   const add = (tk, items) => {
     if (seen[tk]) return;
     seen[tk] = true;
-    items.filter((it) => it && typeof it.title === "string" && it.title).slice(0, NEWS_KEEP)
+    // a thinly covered stock's newest Yahoo item can be months old: not shown here (13.3)
+    items.filter((it) => it && typeof it.title === "string" && it.title && (!isFin(it.time) || it.time >= since)).slice(0, NEWS_KEEP)
       .forEach((it) => out.push({ tk: tk, it: it }));
   };
   const tk = state.focusTicker;
@@ -3751,8 +3761,30 @@ const newsPageFeed = (d, state, cfg) => {
       if (r.tickers.indexOf(tk) < 0) r.tickers.push(tk);
     });
   });
+  // market feeds (13.3): rows tagged "@id"; muted / narrowed like a ticker
+  const feedsOn = cfg.market.filter((f) => NEWS_FEEDS[f] && !muted["@" + f]);
+  feedsOn.forEach((f) => {
+    const key = "@" + f;
+    let list = newsItemsOf(d, key);
+    nItems += list.length;
+    if (spanS) list = list.filter((it) => isFin(it.time) && now - it.time <= spanS);
+    nSpan += list.length;
+    if (q) list = list.filter((it) => it.title.toLowerCase().indexOf(q) >= 0 || NEWS_FEEDS[f].toLowerCase().indexOf(q) >= 0);
+    nQ += list.length;
+    list.slice(0, cfg.per).forEach((it) => {
+      const k = newsKey(it);
+      let r = byKey[k];
+      if (!r) {
+        r = byKey[k] = { title: it.title, source: typeof it.source === "string" ? it.source : "", time: isFin(it.time) ? it.time : null,
+          url: typeof it.url === "string" ? it.url : "", tickers: [], move: null };
+        rows.push(r);
+      }
+      if (r.tickers.indexOf(key) < 0) r.tickers.push(key);
+    });
+  });
+  const liveAll = live.concat(feedsOn.map((f) => "@" + f));
   rows.forEach((r) => {
-    r.tickers.sort(az);
+    r.tickers.sort((a, b) => (isFeedKey(a) ? 1 : 0) - (isFeedKey(b) ? 1 : 0) || az(a, b));
     r.move = r.tickers.reduce((m, t) => { const v = newsMoveOf(d, t); return isFin(v) && (m === null || Math.abs(v) > Math.abs(m)) ? v : m; }, null);
   });
   const focusFirst = (a, b) => (focus ? (b.tickers.indexOf(focus) >= 0 ? 1 : 0) - (a.tickers.indexOf(focus) >= 0 ? 1 : 0) : 0);
@@ -3774,13 +3806,13 @@ const newsPageFeed = (d, state, cfg) => {
       g.forEach((r) => entries.push({ kind: "story", row: r, tags: r.tickers.filter((x) => x !== t) }));
     });
   } else entries = rows.map((r) => ({ kind: "story", row: r, tags: r.tickers }));
-  const inScope = (list) => (n && isFin(n.keep) && Array.isArray(list) ? list.filter((t) => typeof t === "string" && live.indexOf(t) >= 0).sort(az) : []);
+  const inScope = (list) => (n && isFin(n.keep) && Array.isArray(list) ? list.filter((t) => typeof t === "string" && liveAll.indexOf(t) >= 0).sort(az) : []);
   const tks = {};
   rows.forEach((r) => r.tickers.forEach((t) => { tks[t] = true; }));
   return { rows: rows, entries: entries, pending: inScope(n && n.pending), failed: inScope(n && n.failed),
     counts: { stories: rows.length, tickers: Object.keys(tks).length },
     updated: n && isFin(n.fetchedAt) ? n.fetchedAt : null, capped: !!(n && isFin(n.keep) && n.keep < cfg.per),
-    scopeEmpty: scopeEmpty, allMuted: scope.length > 0 && !live.length, planned: live.length,
+    scopeEmpty: scopeEmpty && !feedsOn.length, allMuted: scope.length > 0 && !live.length && !feedsOn.length, planned: liveAll.length,
     spanHid: nItems > 0 && nSpan === 0, qHid: nSpan > 0 && nQ === 0, busy: !!(nw && nw.busy) };
 };
 // pages of `per` entries; a heading that would fill a page's last slot moves on with its stories
@@ -5248,6 +5280,9 @@ const editorNode = (state, dispatch, d, L, has) => {
           pick("week", "span", "week", "the last 7 days"), pick("all", "span", "all", "any time")], "span")}
         {row("layout", [flag("dense", "dense", "one line per story"), flag("group by ticker", "group", "a heading per ticker"),
           flag("source", "sources", "show the source and the time")], "layout")}
+        {row("market news", NEWS_FEED_IDS.map((f) => chip(NEWS_FEEDS[f], cfg.market.indexOf(f) >= 0,
+          () => setNews({ market: cfg.market.indexOf(f) >= 0 ? cfg.market.filter((x) => x !== f) : cfg.market.concat([f]) }),
+          "the latest headlines from " + NEWS_FEEDS[f] + " (its public feed, fetched every 15 minutes) mixed into this page", "mk:" + f)), "market")}
         {cfg.mute.length ? row("muted", cfg.mute.map((t) => chip(t + " ×", false, () => setNews({ mute: cfg.mute.filter((x) => x !== t) }), "show " + t + " again", "mu:" + t))
           .concat([chip("unmute all", false, () => setNews({ mute: [] }), "show every ticker again", "mu:all")]), "mute") : null}
         {cfg.q ? row("keyword", [chip("keyword: " + cfg.q + " ×", false, () => setNews({ q: "" }), "the saved filter (typed in the panel's filter box) — click to clear", "q")], "q") : null}
@@ -6411,7 +6446,7 @@ const renderWin = (state, dispatch) => {
               onClick={() => { savePref("news", true, dispatch).then(() => { if (state.focusTicker) loadNews(state.focusTicker, dispatch); }); }}>turn on</span>
           </div>
         ) : !all.length ? (
-          <div className={msg}>{feed.busy ? "loading headlines…" : "no headlines for today's movers yet"}</div>
+          <div className={msg}>{feed.busy ? "loading headlines…" : "no recent headlines for today's movers"}</div>
         ) : shown.map((r, i) => {
           const cmd = openCmd(r.it.url);
           const meta = [r.tk, typeof r.it.source === "string" && r.it.source ? r.it.source : null, agoText(r.it.time) || null]
@@ -6464,11 +6499,12 @@ const renderWin = (state, dispatch) => {
     const canOpen = enabled(win, "panel.holdings");
     const tagClick = (tk) => (ev) => {
       ev.stopPropagation();
+      if (isFeedKey(tk)) { setQuery(newsTagText(tk), cfg.q); return; }   // a market outlet (13.3): only its stories
       if (!TICKER_RE.test(tk)) return;
       if (canOpen) openStock(tk, dispatch, state); else setQuery(tk, cfg.q);
     };
-    const tagTip = (tk) => (canOpen ? "open " + tk : "only " + tk + "'s headlines");
-    const tag = (tk, key, style) => <span key={key} className={newsTagCss} style={style} title={tagTip(tk)} onClick={tagClick(tk)}>{tk}</span>;
+    const tagTip = (tk) => (isFeedKey(tk) ? "only " + newsTagText(tk) + " stories" : canOpen ? "open " + tk : "only " + tk + "'s headlines");
+    const tag = (tk, key, style) => <span key={key} className={newsTagCss} style={style} title={tagTip(tk)} onClick={tagClick(tk)}>{newsTagText(tk)}</span>;
     const muteX = (tk, key) => (cfg.mute.length >= NEWS_LIST_MAX || !TICKER_RE.test(tk) ? null
       : <span key={key} className="pw-mute" title={"hide " + tk + " here"}
           onClick={(ev) => { ev.stopPropagation(); setNews({ mute: cfg.mute.concat([tk]) }); }}>×</span>);
@@ -6493,7 +6529,9 @@ const renderWin = (state, dispatch) => {
       }
       const meta = [];
       e.tags.forEach((t, i) => { if (i) meta.push(" · "); meta.push(tag(t, "t" + t)); meta.push(muteX(t, "m" + t)); });
-      const rest = (cfg.sources ? [r.source || null, agoText(r.time) || null] : []).filter((x) => x).join(" · ");
+      // a market story's source is its outlet — already the tag, not repeated
+      const fromFeed = e.tags.some((t) => isFeedKey(t) && newsTagText(t) === r.source);
+      const rest = (cfg.sources ? [fromFeed ? null : r.source || null, agoText(r.time) || null] : []).filter((x) => x).join(" · ");
       if (rest) meta.push((meta.length ? " · " : "") + rest);
       return (
         <div key={key} className={newsRowCss} style={{ marginTop: 3, lineHeight: 1.25, minWidth: 0 }}>
@@ -6518,7 +6556,7 @@ const renderWin = (state, dispatch) => {
     const ci = L.cols.findIndex((c) => c.some((u) => u.ids.indexOf("panel.news") >= 0));
     const colW = ci >= 0 ? L.colW[ci] : L.CW;
     const filterOn = newsFilterOn(colW);
-    const scopeWord = cfg.scope === "pick" ? cfg.tickers.length + " picked" : NEWS_SCOPE_TEXT[cfg.scope];
+    const scopeWord = cfg.scope === "pick" ? cfg.tickers.length + " picked" : (NEWS_SCOPE_TEXT[cfg.scope] + (cfg.market.length ? " + market" : ""));
     const nStories = feed.counts ? feed.counts.stories : 0;
     const nPlaced = cfg.group ? (feed.entries || []).filter((e) => e.kind === "story").length : nStories;
     const eye = "news · " + scopeWord + " · " + nStories + (nStories === 1 ? " story" : " stories") + (feed.capped ? " · capped" : "") +

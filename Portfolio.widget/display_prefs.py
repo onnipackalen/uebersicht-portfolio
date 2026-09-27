@@ -79,9 +79,10 @@ NEWS_LIST_MAX = 40
 NEWS_Q_MAX = 60
 # a Yahoo symbol: portfolio_file.TICKER_RE / portfolio_tracker.SYMBOL_RE
 NEWS_TICKER_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$")
+NEWS_FEED_IDS = ("cnbc", "marketwatch", "yahoo", "ft")   # portfolio_tracker.NEWS_FEEDS (13.3)
 NEWS_DEFAULTS = (("scope", "movers"), ("tickers", []), ("per", 3), ("sort", "move"),
                  ("span", "all"), ("group", False), ("dense", False), ("sources", True),
-                 ("mute", []), ("q", ""))
+                 ("mute", []), ("q", ""), ("market", []))
 NEWS_MIN_PER = 3                # the tracker keeps at least this many per ticker
 
 
@@ -171,6 +172,21 @@ def _news_tickers(v, strict):
     return out
 
 
+def _news_feeds(v, strict):
+    """windows[i].news.market: known feed ids, deduped, order kept; strict:
+    None on anything else, lenient: unknown entries dropped."""
+    if not isinstance(v, list):
+        return None
+    out = []
+    for x in v:
+        if isinstance(x, str) and x in NEWS_FEED_IDS:
+            if x not in out:
+                out.append(x)
+        elif strict:
+            return None
+    return out
+
+
 def _news_clean(v, strict, p=""):
     """windows[i].news -> the cleaned object (default-valued fields dropped,
     the object kept even when empty). strict: _Bad on a bad field;
@@ -204,6 +220,10 @@ def _news_clean(v, strict, p=""):
             x = _news_q(x)
             good = x is not None
             msg = "text of up to 60 characters"
+        elif key == "market":
+            x = _news_feeds(x, strict)
+            good = x is not None
+            msg = "a list of feeds: " + ", ".join(NEWS_FEED_IDS)
         else:                       # group, dense, sources
             good = isinstance(x, bool)
             msg = "true or false"
@@ -410,7 +430,7 @@ def news_plan(obj):
     d = clean_display(obj)
     if not d:
         return None
-    scopes, picks, per = set(), set(), NEWS_MIN_PER
+    scopes, picks, feeds, per = set(), set(), set(), NEWS_MIN_PER
     for w in d["windows"]:
         if NEWS_PANEL not in w.get("items", ()):
             continue
@@ -419,7 +439,9 @@ def news_plan(obj):
         scopes.add(scope)
         if scope == "pick":
             picks.update(cfg.get("tickers", ()))
+        feeds.update(cfg.get("market", ()))
         per = max(per, cfg.get("per", 3))
     if not scopes:
         return None
-    return {"scopes": sorted(scopes), "tickers": sorted(picks), "per": int(per)}
+    return {"scopes": sorted(scopes), "tickers": sorted(picks), "per": int(per),
+            "feeds": sorted(feeds)}

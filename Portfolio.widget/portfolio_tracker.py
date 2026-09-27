@@ -200,6 +200,23 @@ NEWS_PRUNE = 86400              # news.json entries older than this are dropped
 # the widget's single-quoted `open '...'` (quote() encodes everything else)
 NEWS_URL_SAFE = "-._~:/?#[]@!$&()*+,;=%"
 NEWS_URL_RE = re.compile(r"https://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+")
+# market headlines (13.3): the public RSS feeds of the big outlets, for the
+# news page's "market news" (display.windows[i].news.market). Cached in
+# news.json under "@<id>" keys (never a ticker), fetched again after
+# NEWS_FEED_TTL, items older than NEWS_FEED_MAX_AGE dropped when parsed.
+# (WSJ's public feeds stopped updating in 2025, so they are not offered.)
+NEWS_FEEDS = {
+    "cnbc": ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+    "marketwatch": ("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    "yahoo": ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+    "ft": ("FT", "https://www.ft.com/markets?format=rss"),
+}
+NEWS_FEED_TTL = 900             # s: a feed is fetched again after this
+NEWS_FEED_KEEP = 15             # headlines kept per feed
+NEWS_FEED_MAX_AGE = 3 * 86400   # older feed items are dropped when parsed
+NEWS_FEED_BYTES = 1 << 20       # a feed answer is read up to this
+NEWS_FEED_TIMEOUT = 8           # s
+NEWS_FEED_UA = "Mozilla/5.0 (Macintosh) Portfolio.widget"
 
 # Yahoo symbols (watch list, benchmark): "SPY", "^GSPC", "BRK-B", "EURUSD=X"
 SYMBOL_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$")
@@ -1428,7 +1445,7 @@ def news_fresh(entry, now):
     t = news_entry_t(entry)
     if t is None:
         return False
-    ttl = NEWS_TTL
+    ttl = NEWS_FEED_TTL if entry.get("feed") else NEWS_TTL     # a market feed (13.3)
     if entry.get("error") and news_entry_fails(entry) <= NEWS_FAIL_MAX:
         ttl = NEWS_FAIL_TTL
     return 0 <= now - t < ttl
@@ -1515,6 +1532,87 @@ def news_for(ticker, yf_module, cache_dir, now=None, cache=None):
     entry, _ = news_fetch_entry(ticker, yf_module, entry, now)
     save_news_entry(cache_dir, ticker, entry, now)
     return entry["items"], now, False, bool(entry["error"])
+
+
+def feed_time(v):
+    """epoch from an RSS / Atom date: RFC 822 ("Sat, 26 Sep 2026 17:10:32
+    GMT", "… -0500") or ISO; None when unreadable."""
+    if not isinstance(v, str) or not v.strip():
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        d = parsedate_to_datetime(v.strip())
+        if d is not None:
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return int(d.timestamp())
+    except Exception:
+        pass
+    return news_time(v)
+
+
+def parse_feed(data, name, now=None):
+    """RSS 2.0 / Atom bytes -> NewsItems whose source is the feed's `name`,
+    newest first, at most NEWS_FEED_KEEP; items without a readable time, a
+    usable https link, or older than NEWS_FEED_MAX_AGE are dropped. Raises
+    on unparsable XML."""
+    import xml.etree.ElementTree as ET
+    now = now_epoch() if now is None else now
+    root = ET.fromstring(data)
+    atom = "{http://www.w3.org/2005/Atom}"
+    dc = "{http://purl.org/dc/elements/1.1/}"
+    items = []
+    for n, it in enumerate(list(root.iter("item")) + list(root.iter(atom + "entry"))):
+        title = it.findtext("title") or it.findtext(atom + "title")
+        link = it.findtext("link")
+        if not link:
+            for l in it.findall(atom + "link"):
+                if l.get("rel") in (None, "alternate") and l.get("href"):
+                    link = l.get("href")
+                    break
+        when = (it.findtext("pubDate") or it.findtext(dc + "date")
+                or it.findtext(atom + "published") or it.findtext(atom + "updated"))
+        t = feed_time(when)
+        if t is None or now - t > NEWS_FEED_MAX_AGE:
+            continue
+        item = news_item(title, name, t, (link or "").strip())
+        if item and item["url"]:
+            items.append((-t, n, item))
+    return [item for _, _, item in sorted(items, key=lambda x: x[:2])][:NEWS_FEED_KEEP]
+
+
+def fetch_feed(fid, now=None):
+    """The items of one NEWS_FEEDS entry: one https GET (NEWS_FEED_TIMEOUT s,
+    at most NEWS_FEED_BYTES). With PORTFOLIO_NEWS_FEED_DIR set (tests) the
+    file <dir>/<id>.xml is read instead. Raises on network trouble."""
+    name, url = NEWS_FEEDS[fid]
+    test_dir = os.environ.get("PORTFOLIO_NEWS_FEED_DIR")
+    if test_dir:
+        with open(os.path.join(test_dir, fid + ".xml"), "rb") as f:
+            data = f.read(NEWS_FEED_BYTES)
+    else:
+        import urllib.request
+        req = urllib.request.Request(url, headers={
+            "User-Agent": NEWS_FEED_UA,
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5"})
+        with urllib.request.urlopen(req, timeout=NEWS_FEED_TIMEOUT, context=feed_ssl_context()) as r:
+            data = r.read(NEWS_FEED_BYTES)
+    return parse_feed(data, name, now)
+
+
+def feed_ssl_context():
+    """The default TLS context, plus certifi's roots when it is installed:
+    python.org's Python ships no system roots for urllib (yfinance's own
+    requests use certifi), so without this every feed fails with
+    CERTIFICATE_VERIFY_FAILED. Verification is never turned off."""
+    import ssl
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
 
 
 # --------------------------------------------------------------------------
@@ -3980,6 +4078,9 @@ def main(argv=None, yf_module=None):
     def meta_job(job):
         kind, tk = job
         try:
+            if kind == "feed":
+                feed_fetch_job(tk)
+                return
             if kind == "news":
                 news_fetch_job(tk)
                 return
@@ -4013,6 +4114,7 @@ def main(argv=None, yf_module=None):
     news_panel = news_plan is not None       # == display_prefs.wants_news
     news_movers, news_cache, news_got, news_now = [], {}, {}, now_epoch()
     news_planned, news_dropped, news_jobs = [], 0, []
+    news_feeds, feed_jobs = [], []
     news_state = {"ok": 0, "fail": 0, "skipped": 0, "broken": False, "rate": None}
     news_sem, news_state_lock = threading.Semaphore(NEWS_PARALLEL), threading.Lock()
     if news_on:
@@ -4041,6 +4143,10 @@ def main(argv=None, yf_module=None):
                 news_planned.append(tk)
         news_dropped = max(0, len(news_planned) - NEWS_PLAN_MAX)
         news_planned = news_planned[:NEWS_PLAN_MAX]
+        # market feeds (13.3): the union the news pages ask for, each fetched
+        # when its entry is older than NEWS_FEED_TTL (their own hosts: outside
+        # Yahoo's budget and breaker)
+        news_feeds = [f for f in (news_plan.get("feeds", ()) if news_plan else ()) if f in NEWS_FEEDS]
         # right before dispatching: the file as it is now (ticker_lookup.py
         # writes it too), then the fetch order
         news_cache = read_news_cache(cache_dir)
@@ -4051,6 +4157,7 @@ def main(argv=None, yf_module=None):
         oldest = sorted((tk for tk in rest if tk not in never),
                         key=lambda tk: (news_entry_t(news_cache[tk]), tk))
         news_jobs = (first + never + oldest)[:NEWS_MAX_PER_REFRESH]
+        feed_jobs = [f for f in news_feeds if not news_fresh(news_cache.get("@" + f), news_now)]
 
     def news_fetch_job(tk):
         """one planned ticker: fetched unless the breaker tripped; the entry
@@ -4072,6 +4179,18 @@ def main(argv=None, yf_module=None):
                 else:
                     news_state["ok"] += 1
 
+    def feed_fetch_job(fid):
+        """one market feed (13.3): its own host, so outside Yahoo's breaker; a
+        failure keeps the last headlines and counts like a ticker's"""
+        prev = news_cache.get("@" + fid)
+        try:
+            entry = {"t": news_now, "items": fetch_feed(fid, news_now), "error": False, "feed": True}
+        except Exception:
+            entry = {"t": news_now, "items": news_entry_items(prev, NEWS_FEED_KEEP) if prev else [],
+                     "error": True, "fails": news_entry_fails(prev) + 1, "feed": True}
+        with news_state_lock:
+            news_got["@" + fid] = entry
+
     # news jobs interleaved with the meta work (news, meta, meta, news, ...):
     # no burst of news requests at the start of a refresh
     meta_jobs = [("meta", tk) for tk in tickers + watch] + [("divs", tk) for tk in tickers + sold_only]
@@ -4081,6 +4200,7 @@ def main(argv=None, yf_module=None):
         jobs.extend(meta_jobs[mi:mi + 2])
         mi += 2
     jobs.extend(meta_jobs[mi:])
+    jobs = [("feed", f) for f in feed_jobs] + jobs      # quick, other hosts: first
     with ThreadPoolExecutor(max_workers=12) as ex:
         list(ex.map(meta_job, jobs))
     news_out = {"on": False}
@@ -4106,6 +4226,19 @@ def main(argv=None, yf_module=None):
             items = news_entry_items(entry, keep)
             if items:
                 raw_items[tk], news_t[tk] = items, int(t)
+        news_feed_out = {}
+        for fid in news_feeds:                       # market feeds under "@id"
+            entry = news_got.get("@" + fid, news_cache.get("@" + fid))
+            t = news_entry_t(entry)
+            if t is None:
+                pending.append("@" + fid)
+                continue
+            if entry.get("error"):
+                failed_tks.append("@" + fid)
+            items = news_entry_items(entry, NEWS_FEED_KEEP)
+            if items:
+                raw_items["@" + fid], news_t["@" + fid] = items, int(t)
+            news_feed_out[fid] = {"name": NEWS_FEEDS[fid][0], "t": int(t)}
         per_out = 1
         for k in range(keep, 0, -1):
             if sum(min(k, len(v)) for v in raw_items.values()) <= NEWS_OUT_MAX:
@@ -4116,6 +4249,8 @@ def main(argv=None, yf_module=None):
         if news_panel:
             news_out["top"] = [tk for tk in news_movers if tk in news_items]
             news_out["keep"] = per_out
+            if news_feeds:
+                news_out["feeds"] = news_feed_out
             news_out["pending"] = sorted(pending)
             news_out["failed"] = sorted(failed_tks)
             if news_t:

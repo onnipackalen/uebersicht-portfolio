@@ -272,11 +272,13 @@ def news_refresh_wanted(old_plan, new_plan, positions):
     ticker it lacked that has no fresh entry in .cache/news.json."""
     if not new_plan:
         return False
-    old = old_plan or {"scopes": [], "tickers": []}
+    old = old_plan or {"scopes": [], "tickers": [], "feeds": []}
     old_scopes = set(old["scopes"])
     if old_plan:
         old_scopes.add("movers")        # the tracker always plans the movers
     if set(new_plan["scopes"]) - old_scopes:
+        return True
+    if set(new_plan.get("feeds", ())) - set(old.get("feeds", ())):   # a market feed (13.3)
         return True
     new_picks = set(new_plan["tickers"]) - set(old["tickers"])
     if not new_picks:
