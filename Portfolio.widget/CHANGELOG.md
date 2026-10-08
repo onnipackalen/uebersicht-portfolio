@@ -1,5 +1,43 @@
 # Changelog
 
+## 13.4
+
+- **Light look, or follow the Mac**: ⚙ → Portfolio → **look** — dark (as
+  before), light, or **follow my Mac** (System Settings → Appearance, live).
+  **background** sets how solid the card is: solid · normal · lighter ·
+  glass. Saved as `theme` and `opacity` in `_settings`.
+- **Find a setting**: a search box at the top of ⚙ shows only the settings
+  whose name or explanation contains what you type, across the Portfolio,
+  window and "what it shows" groups.
+- **Reset portfolio settings**: one chip (with a confirm) puts currency,
+  history, index, headlines, alerts, rebalancing, look and updates back to
+  their defaults — holdings, name, targets and windows stay
+  (`set_setting.py portfolio reset-all`).
+- **Welcome card** for new users: while the holdings are still the demo
+  portfolio's, the first window opens with three steps — add your stocks
+  (one at a time, **import a list…**, or **start fresh**), pick your
+  currency and look, choose what the window shows. **hide** closes it
+  (`welcome: false`); it goes by itself once the holdings are yours.
+- **Import a list**: **+ → import a list…** adds many holdings at once —
+  paste one per line (`KO 10`, `MSFT 5 at 310 on 2024-03-01`) or a
+  broker's CSV export, or **choose a file…**; **preview** shows every row
+  with what was understood and why a line was skipped (a sale, a total row,
+  no ticker), **add N holdings** writes them as lots and keeps a copy of the
+  old file (`positions.backup-…-import.json`). Column names (symbol,
+  quantity, average cost, book value, trade date…), currency signs,
+  thousands separators and the usual date formats are recognised
+  (`import_positions.py`, standard library only).
+- **Update check**: once a day the widget asks GitHub for its newest release
+  (one plain request, nothing about you; `updates: false` turns it off). A
+  newer one shows as **update 13.5 ▸** in the bottom row; **yes, update**
+  downloads it, keeps `positions.json`, its backups, `python.txt` and
+  `.cache/`, puts the old code in `~/.portfolio-widget/backups/` and reloads
+  (`update.sh`; **what's new** opens the release notes, **later** waits for
+  the next version). ⚙ → Portfolio → **updates** has check once a day ·
+  never · check now, and says what the last check found.
+- Every colour now comes from the theme's CSS variables; a window's root
+  carries `data-pw-theme`.
+
 ## 13.3
 
 - **Market headlines**: the news page can mix in the latest stories from

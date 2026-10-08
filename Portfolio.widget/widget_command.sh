@@ -21,6 +21,9 @@
 #   widget_command.sh news TICKER                  -> JSON headlines (only with
 #                                                     _settings.news true)
 #   widget_command.sh export -> CSVs in ~/Documents/Portfolio (JSON)
+#   widget_command.sh import preview|commit --text LIST | --file PATH   (13.4)
+#                     import choose          -> a native "choose file" dialog
+#   widget_command.sh update check | run [ZIP_URL]   -> the newest release (13.4)
 #
 # Python: the first interpreter that can `import yfinance` wins — the path
 # written in python.txt (next to this file) if you made one, then the venv
@@ -245,6 +248,59 @@ case "$1" in
     printf '%s\n' "$out"
     exit 0
     ;;
+  import)
+    # many holdings at once (import_positions.py, 13.4): "preview" parses
+    # a pasted list / a CSV file and answers the rows, "commit" writes them;
+    # "choose" shows the Mac's own file dialog and answers {"file": path}.
+    # Standard library only, JSON on stdout and nothing else.
+    case "$2" in
+      choose)
+        f=$(osascript -e 'tell application "System Events" to activate' \
+              -e 'POSIX path of (choose file with prompt "Pick the list of holdings (CSV or text):" of type {"public.comma-separated-values-text", "public.tab-separated-values-text", "public.plain-text", "public.text", "public.data"})' 2>/dev/null)
+        if [ -n "$f" ]; then
+          printf '{"file": %s}\n' "$(printf '%s' "$f" | json_string)"
+        else
+          echo '{"cancelled": true}'
+        fi
+        exit 0
+        ;;
+      preview|commit)
+        PY=$(find_python any) || { echo '{"error": "no python3 found"}'; exit 0; }
+        commit=""; [ "$2" = commit ] && commit="--commit"
+        out=$("$PY" "$SCRIPT_DIR/import_positions.py" --positions "$POSITIONS" $commit "${@:3}" 2>/dev/null)
+        [ -n "$out" ] || out='{"error": "the import failed"}'
+        printf '%s\n' "$out"
+        exit 0
+        ;;
+      *) echo '{"error": "import takes preview, commit or choose"}'; exit 0 ;;
+    esac
+    ;;
+  update)
+    # the newest release on GitHub (13.4): "check" asks now (JSON {latest,
+    # url, zip, checked, ok}); "run" installs it with update.sh — copied to
+    # a temp folder first, since it replaces this folder's files, its own
+    # included — and answers its JSON ({ok, from, to, message}; the result
+    # is also in .cache/update.result, which the envelope below carries)
+    case "$2" in
+      check)
+        PY=$(find_python any) || { echo '{"error": "no python3 found"}'; exit 0; }
+        out=$("$PY" "$TRACKER" --positions "$POSITIONS" --check-update 2>/dev/null)
+        [ -n "$out" ] || out='{"error": "the check failed"}'
+        printf '%s\n' "$out"
+        exit 0
+        ;;
+      run)
+        tmp=$(mktemp -d 2>/dev/null) || tmp="/tmp/portfolio-update.$$"
+        mkdir -p "$tmp" && cp "$SCRIPT_DIR/update.sh" "$tmp/update.sh" 2>/dev/null \
+          || { echo '{"ok": false, "message": "could not copy update.sh"}'; exit 0; }
+        if [ -n "$3" ]; then
+          exec bash "$tmp/update.sh" --target "$SCRIPT_DIR" --temp "$tmp" --url "$3" 2>/dev/null
+        fi
+        exec bash "$tmp/update.sh" --target "$SCRIPT_DIR" --temp "$tmp" 2>/dev/null
+        ;;
+      *) echo '{"error": "update takes check or run"}'; exit 0 ;;
+    esac
+    ;;
 esac
 
 # ---------------------------------------------------------------- refresh
@@ -435,4 +491,12 @@ if { [ "$status" = "error" ] || [ "$status" = "setup" ] || [ "$last_failed" = tr
   error_text=$(tail -c 600 "$LOG_FILE" | json_string)
 fi
 
-echo "{\"status\": \"$status\", \"cacheAgeSeconds\": $age, \"lastFetchFailed\": $last_failed, \"progress\": $progress_json, \"historyProgress\": $history_json, \"data\": $cached_json, \"errorText\": $error_text}"
+# the last update.sh run, while it is fresh (the footer says "updated to X")
+update_json="null"
+UPDATE_RESULT="$CACHE_DIR/update.result"
+if [ -s "$UPDATE_RESULT" ] && [ "$(file_age_seconds "$UPDATE_RESULT")" -lt 900 ]; then
+  update_json=$(head -c 2000 "$UPDATE_RESULT" 2>/dev/null)
+  [[ $update_json =~ $JSON_OBJECT ]] || update_json="null"
+fi
+
+echo "{\"status\": \"$status\", \"cacheAgeSeconds\": $age, \"lastFetchFailed\": $last_failed, \"progress\": $progress_json, \"historyProgress\": $history_json, \"updateResult\": $update_json, \"data\": $cached_json, \"errorText\": $error_text}"

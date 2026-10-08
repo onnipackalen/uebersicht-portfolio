@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 set_setting.py — save one of the widget's display choices in positions.json
+(13.4: also theme dark|light|auto, opacity 0.3-1, updates / welcome true|false,
+and "portfolio reset-all", which drops every portfolio setting in one write)
 (widget_command.sh setting KEY VALUE runs this when you click them).
 
     python3 set_setting.py showBenchmark false   # "hide" under the graph
@@ -85,7 +87,12 @@ KEYS = ("showBenchmark", "graphBig", "compact", "position", "scale", "news",
         "rebalanceWhole", "benchmark", "display",
         # 13.2: the portfolio's own settings
         "title", "currency", "backtestYears", "alerts", "alertThreshold",
-        "portfolioAlertThreshold")
+        "portfolioAlertThreshold",
+        # 13.4: appearance, the update check, the welcome card, and
+        # "portfolio reset-all" (every portfolio setting back to its default)
+        "theme", "opacity", "updates", "welcome", "portfolio")
+THEMES = ("dark", "light", "auto")          # auto = follow the Mac's appearance
+OPACITY_RANGE = (0.3, 1)                    # how solid the window's background is
 TRUE = ("true", "1", "on", "yes")
 FALSE = ("false", "0", "off", "no")
 DEFAULT = ("default", "reset", "none")
@@ -102,7 +109,15 @@ THRESHOLD_RANGE = {"alertThreshold": (0.5, 50), "portfolioAlertThreshold": (0.1,
 UI_DEFAULT = {"position": None, "scale": 1, "display": None,
               "title": "portfolio", "currency": "auto", "backtestYears": 5,
               "alerts": False, "alertThreshold": 5, "portfolioAlertThreshold": 2.5,
-              "rebalanceWhole": None}
+              "rebalanceWhole": None,
+              "theme": "dark", "opacity": 0.88, "updates": True, "welcome": True}
+# "portfolio reset-all" (13.4): these keys leave _settings in one write (the
+# name, the targets and the windows stay); data.json's "ui" gets the defaults
+PORTFOLIO_RESET = (("currency", "auto"), ("backtestYears", 5), ("benchmark", "auto"),
+                   ("news", False), ("alerts", False), ("alertThreshold", 5),
+                   ("portfolioAlertThreshold", 2.5), ("rebalanceWhole", None),
+                   ("theme", "dark"), ("opacity", 0.88), ("updates", True))
+PF_RESET = object()
 # "display reset-all": these keys leave _settings, data.json's "ui" gets
 # these values (the tracker's defaults) — one write each
 RESET_ALL = (("display", None), ("position", None), ("scale", 1),
@@ -161,6 +176,28 @@ def parse_value(key, value):
             return None, "title must be 1–40 characters (no line breaks), got %r" % value
         return t, None
     text = str(value).strip().lower()
+    if key == "portfolio":
+        if text == "reset-all":
+            return PF_RESET, None
+        return None, "portfolio takes only reset-all, got %r" % value
+    if key == "theme":
+        if text == "default":
+            return None, None
+        if text not in THEMES:
+            return None, "theme must be dark, light or auto, got %r" % value
+        return text, None
+    if key == "opacity":
+        if text == "default":
+            return None, None
+        pct = text.endswith("%")
+        num = parse_number(text[:-1].strip() if pct else text,
+                           (OPACITY_RANGE[0] * 100, OPACITY_RANGE[1] * 100) if pct else OPACITY_RANGE)
+        if num is None:
+            return None, "opacity must be a number from 0.3 to 1 (or 30%% to 100%%) or default, got %r" % value
+        num = round(num / 100.0, 2) if pct else round(float(num), 2)
+        return int(num) if num == int(num) else num, None
+    if key in ("updates", "welcome") and text == "default":
+        return None, None
     if key == "currency":
         if text in ("auto", "default"):
             return None, None
@@ -348,6 +385,11 @@ def main():
                     if k in settings:
                         del settings[k]
                         changed = True
+            elif value is PF_RESET:            # "portfolio reset-all" (13.4)
+                for k, _ in PORTFOLIO_RESET:
+                    if k in settings:
+                        del settings[k]
+                        changed = True
             elif value is None:                # "default": remove the key
                 if args.key in settings:
                     del settings[args.key]
@@ -361,10 +403,12 @@ def main():
         # too, so a restart starts in it — no fetch for a display choice
         if value is display_prefs.RESET:
             patch_cached_ui(args.positions, dict(RESET_ALL))
+        elif value is PF_RESET:
+            patch_cached_ui(args.positions, dict(PORTFOLIO_RESET))
         else:
             patch_cached_ui(args.positions, {
                 args.key: UI_DEFAULT.get(args.key) if value is None else value})
-        if args.key in ("benchmark", "currency", "backtestYears") and changed:
+        if (args.key in ("benchmark", "currency", "backtestYears") or value is PF_RESET) and changed:
             # new data needed (none for the choice already saved): one fetch
             # with the new index / in the new currency / over the longer
             # history (whose long history the history job then plans like
@@ -383,6 +427,9 @@ def main():
     if value is display_prefs.RESET:
         reply({"ok": True, "key": args.key, "value": None,
                "reset": [k for k, _ in RESET_ALL]})
+    if value is PF_RESET:
+        reply({"ok": True, "key": args.key, "value": None,
+               "reset": [k for k, _ in PORTFOLIO_RESET], "ui": dict(PORTFOLIO_RESET)})
     reply({"ok": True, "key": args.key,
            "value": UI_DEFAULT.get(args.key) if value is None else value})
 

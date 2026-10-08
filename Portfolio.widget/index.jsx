@@ -40,7 +40,9 @@ const SORT_TIP = {
 // (that crashed the 12.x upgrade with "undefined is not an object"), so any
 // state not stamped with this version starts over, keeping only the data
 // that is already on screen. Bump it whenever the state's shape changes.
-const STATE_VERSION = "13.3";
+const STATE_VERSION = "13.4";
+// the release (CHANGELOG.md); the footer offers an update when GitHub's newest release is newer
+const VERSION = "13.4";
 
 // older day-by-day rows loaded on demand ("older ›", an old date typed in the
 // date box, a custom start before the newest ~400 days). `key` ties them to
@@ -103,6 +105,13 @@ export const initialState = {
   // history save {key, epoch, msg} (shown while data.json still carries that
   // epoch) and a per-setting message {key: text} (an error, or a 5 s note)
   editAdvanced: false, editHints: true, settingPending: null, editMsg: {},
+  // 13.4: the editor's search box (per window); the import panel of the +
+  // form {open, text, file, rows, ok, skipped, busy, msg} (shared); the
+  // update offer in the footer: its question open, "later" for a version,
+  // a message {text, err, tick}, "checking…" for the editor's check-now chip
+  editQuery: "",
+  imp: null,
+  updateAsk: false, updateLater: null, updateMsg: null, updateChecking: false,
 };
 
 // Per-window state: every window keeps its own copy of these (range, pinned
@@ -111,11 +120,13 @@ const WIN_KEYS = ["range", "graphMode", "plMode", "view", "mapRange", "mapExpand
   "pinnedSection", "focusTicker", "lookTicker", "showAdd", "detailRange", "detailMsg", "mark", "hoverT", "dayInput",
   "dayMsg", "dayPage", "earnPage", "sectorScale", "sectorOrder", "from", "sectorFocus", "btMode", "salesExpanded",
   "alertInput", "alertMsg", "alertBusy", "alertMsgTick", "alertsExpanded", "rebalExpanded", "benchPick",
-  "benchInput", "benchMsg", "rot", "hover", "editOpen", "editGroup", "editConfirm", "newsPage", "newsQuery", "newsQFrom", "newsPickMsg"];
+  "benchInput", "benchMsg", "rot", "hover", "editOpen", "editGroup", "editConfirm", "newsPage", "newsQuery", "newsQFrom", "newsPickMsg",
+  "editQuery"];
 const WIN_INITIAL = {};
 WIN_KEYS.forEach((k) => { WIN_INITIAL[k] = initialState[k]; });
 
 const NO_SEARCH = { query: "", results: [], busy: false, error: null };
+const IMPORT_EMPTY = { open: true, text: "", file: null, rows: null, ok: 0, skipped: 0, busy: false, msg: null };
 const EMPTY_FORM = { ticker: "", shares: "", cost: "", date: "" };
 
 const merge = (prev, patch) => Object.assign({}, prev, patch);
@@ -224,7 +235,7 @@ const LAYOUT_K = {
   CAPTION: 11, SIMCAP: 11, EYEBROW: 13, ROW_HOLD: 16, ROW_EARN: 15, ROW_DAY: 15, ROW_NEWS: 27,
   ROW_NEWS_DENSE: 14, ROW_NEWS_GROUP: 14, NEWS_FILTER: 18, NEWS_STATUS: 11,
   ROW_ALERT: 13, ROW_LINE: 13, DOTS: 15, PAGER: 16, FOOTER: 11, LOADING: 18, HINT: 14, MINI: 36,
-  ADD_FORM: 124, STAT: 16, BENCH_PICK: 180, COMPACT_SPARK: 90,
+  ADD_FORM: 124, STAT: 16, BENCH_PICK: 180, COMPACT_SPARK: 90, WELCOME: 78, IMPORT: 118,
   // panel estimates (est.* in renderWin): fixed parts and one row each
   DETAIL: 262, DETAIL_X: 58, EMPTY_MSG: 44, MAPTABS: 16, MOVER_ROW: 14, TODAY_FIX: 30, THEME_ROW: 18,
   RISK_ROW: 13, RISK_FIX: 62, INCOME: 64, REBAL_FIX: 28, SALE_ROW: 14, RULE_ROW: 15, MORE: 14, WATCH_ROW: 16,
@@ -779,9 +790,26 @@ const coreReducer = (event, prev) => {
     case "GEO": return merge(prev, { geo: event.geo && typeof event.geo === "object" && typeof event.geo.id === "string" ? event.geo : null });
     case "FRONT": return typeof event.w === "string" && prev.front !== event.w ? merge(prev, { front: event.w }) : prev;
     // the ⚙ editor: `group` (optional) picks the section it opens at
-    case "TOGGLE_EDITOR": return merge(prev, { editOpen: !prev.editOpen, editConfirm: null,
+    case "TOGGLE_EDITOR": return merge(prev, { editOpen: !prev.editOpen, editConfirm: null, editQuery: "",
       editGroup: typeof event.group === "string" ? event.group : prev.editGroup });
-    case "CLOSE_EDITOR": return prev.editOpen ? merge(prev, { editOpen: false, editConfirm: null }) : prev;
+    case "OPEN_EDITOR": return merge(prev, { editOpen: true, editConfirm: null, editQuery: "",   // (the welcome card's links)
+      editGroup: typeof event.group === "string" ? event.group : prev.editGroup });
+    case "CLOSE_EDITOR": return prev.editOpen ? merge(prev, { editOpen: false, editConfirm: null, editQuery: "" }) : prev;
+    case "EDIT_QUERY": return merge(prev, { editQuery: typeof event.value === "string" ? event.value.slice(0, 40) : "" });
+    // the import panel (13.4): null closes it, a patch merges into it
+    case "IMPORT_SET": return merge(prev, { imp: event.imp === null ? null : Object.assign({}, prev.imp || IMPORT_EMPTY, event.imp) });
+    // the footer's update offer (13.4)
+    case "UPDATE_ASK": return merge(prev, { updateAsk: event.on === true });
+    case "UPDATE_LATER": return merge(prev, { updateLater: typeof event.version === "string" ? event.version : null, updateAsk: false });
+    case "UPDATE_MSG": return merge(prev, { updateMsg: event.msg ? { text: String(event.msg), err: !!event.err, tick: prev.tick } : null });
+    case "UPDATE_CHECKING": return merge(prev, { updateChecking: event.on === true });
+    case "UPDATE_INFO": {   // "check now" answered: data.update as the next refresh would carry it
+      if (!prev.raw || !prev.raw.data || typeof prev.raw.data !== "object") return merge(prev, { updateChecking: false });
+      return merge(prev, { updateChecking: false,
+        raw: Object.assign({}, prev.raw, { data: Object.assign({}, prev.raw.data, { update: event.info || null }) }) });
+    }
+    // "reset portfolio settings": this session's clicks on those settings are forgotten too
+    case "PF_RESET_LOCAL": return merge(prev, { newsPref: null, rebalWhole: null, benchWant: null, benchSaved: false, settingPending: null });
     // the open section (one at a time): null = "window", "none" = all closed
     case "EDIT_GROUP": return merge(prev, { editGroup: typeof event.group === "string" ? event.group : null, editConfirm: null });
     // "reset everything" (setting display reset-all): one plain window at the
@@ -807,6 +835,7 @@ const coreReducer = (event, prev) => {
     }
     // a saved setting's reply (set_setting.py's ui value) goes into data.ui at
     // once, so the editor shows it before the next data.json is read
+    case "THEME_MEDIA": return merge(prev, { mediaTick: (prev.mediaTick || 0) + 1 });   // the Mac's appearance changed (theme auto)
     case "UI_PATCH": {
       if (typeof event.key !== "string" || !prev.raw || !prev.raw.data || typeof prev.raw.data !== "object") return prev;
       const ui = Object.assign({}, prev.raw.data.ui && typeof prev.raw.data.ui === "object" ? prev.raw.data.ui : {});
@@ -859,24 +888,69 @@ export const updateState = (event, prevIn) => {
 };
 
 // ------------------------------------------------------------------ colors
+// Every colour is a CSS variable (13.4): a window's root sets them for the
+// theme in use (themeClass), so the same styles draw the dark and the light
+// look. Colours that JavaScript mixes itself (heat-map tiles, volatility)
+// come from paletteNow() instead.
 const C = {
-  ink: "#E7EDF3",
-  dim: "#7C8794",
-  faint: "rgba(255,255,255,0.07)",
-  up: "#34D399",
-  down: "#FB7185",
-  amber: "#F5C044",
-  orange: "#FF9F0A", // over its target allocation (12.10)
-  line: "#AFC3D4", // the ONE color all line graphs use
+  ink: "var(--pw-ink)",
+  dim: "var(--pw-dim)",
+  faint: "var(--pw-faint)",
+  up: "var(--pw-up)",
+  down: "var(--pw-down)",
+  amber: "var(--pw-amber)",
+  orange: "var(--pw-orange)", // over its target allocation (12.10)
+  line: "var(--pw-line)", // the ONE color all line graphs use
+};
+// bg / fg: "r, g, b" for rgba(var(--pw-bg), <opacity>) and the translucent
+// highlights rgba(var(--pw-fg), 0.07); surface = the panel colour behind a
+// marker dot; neutral = the heat map's resting tile; vol = the volatility
+// score colours 1-10 (cool grey -> amber -> orange -> pink, never green/red)
+const PALETTES = {
+  dark: { ink: "#E7EDF3", dim: "#7C8794", faint: "rgba(255,255,255,0.07)", up: "#34D399", down: "#FB7185",
+    amber: "#F5C044", orange: "#FF9F0A", line: "#AFC3D4", bg: "17, 21, 27", fg: "255, 255, 255", surface: "#11151B",
+    tileInk: "rgba(255,255,255,0.94)", tileSub: "rgba(255,255,255,0.78)", tileShadow: "0 1px 2px rgba(0,0,0,0.35)",
+    neutral: [44, 44, 46],
+    vol: [null, "#8FA3B8", "#8FA3B8", "#C9D3DD", "#C9D3DD", "#F5C044", "#F5C044", "#FB923C", "#FB923C", "#F472B6", "#F472B6"] },
+  light: { ink: "#1B2430", dim: "#66717F", faint: "rgba(0,0,0,0.07)", up: "#0E9F6E", down: "#DC3B63",
+    amber: "#A36A00", orange: "#D9730D", line: "#3A5A7C", bg: "247, 248, 250", fg: "0, 0, 0", surface: "#F7F8FA",
+    tileInk: "rgba(0,0,0,0.86)", tileSub: "rgba(0,0,0,0.66)", tileShadow: "none",
+    neutral: [221, 225, 230],
+    vol: [null, "#7D91A6", "#7D91A6", "#95A2B0", "#95A2B0", "#A36A00", "#A36A00", "#D9730D", "#D9730D", "#C2297B", "#C2297B"] },
+};
+const THEMES = ["dark", "light", "auto"];
+let THEME_NOW = "dark";    // the palette in use, set by render() before anything draws
+const paletteNow = () => PALETTES[THEME_NOW] || PALETTES.dark;
+const prefersLight = () => {
+  try { return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches); } catch (e) { return false; }
+};
+// _settings.theme (data.ui.theme): dark (default) | light | auto = the Mac's appearance
+const themeOf = (st) => {
+  const t = uiPrefs(st).theme;
+  return t === "light" ? "light" : t === "auto" ? (prefersLight() ? "light" : "dark") : "dark";
+};
+// _settings.opacity (data.ui.opacity): how solid the window's background is, 0.3-1
+const opacityOf = (st) => {
+  const v = uiPrefs(st).opacity;
+  return typeof v === "number" && isFinite(v) ? Math.min(1, Math.max(0.3, v)) : 0.88;
+};
+const themeClass = (theme, opacity) => {
+  const P = PALETTES[theme] || PALETTES.dark;
+  return css`
+    --pw-ink: ${P.ink}; --pw-dim: ${P.dim}; --pw-faint: ${P.faint}; --pw-up: ${P.up}; --pw-down: ${P.down};
+    --pw-amber: ${P.amber}; --pw-orange: ${P.orange}; --pw-line: ${P.line}; --pw-bg: ${P.bg}; --pw-fg: ${P.fg};
+    --pw-surface: ${P.surface}; --pw-tile-ink: ${P.tileInk}; --pw-tile-sub: ${P.tileSub}; --pw-tile-shadow: ${P.tileShadow};
+    --pw-opacity: ${opacity};
+    color: var(--pw-ink);
+  `;
 };
 
 // volatility score 1-10: cool grey -> amber -> orange -> pink (never green/red,
 // which mean up/down everywhere else)
-const VOL_COLOR = [C.dim, "#8FA3B8", "#8FA3B8", "#C9D3DD", "#C9D3DD",
-  "#F5C044", "#F5C044", "#FB923C", "#FB923C", "#F472B6", "#F472B6"];
+const VOL_COLOR = PALETTES.dark.vol;   // (the dark set; volColor picks the theme's)
 const VOL_LABEL = ["", "very calm", "calm", "moderate", "moderate", "lively",
   "lively", "wild", "wild", "extreme", "extreme"];
-const volColor = (s) => VOL_COLOR[s] || C.dim;
+const volColor = (s) => paletteNow().vol[s] || C.dim;
 const volTip = (pct, score) => score
   ? "volatility " + pct + "%/yr — score " + score + "/10, " + VOL_LABEL[score] +
     "\n(how much the price swung over the last 3 months; about 1 point per 10%)"
@@ -890,15 +964,15 @@ export const className = `
   right: 24px;
   width: ${WIDGET_W}px;
   font-family: -apple-system, "Helvetica Neue", sans-serif;
-  color: ${C.ink};
+  color: #E7EDF3;
 `;
 
 // No backdrop-filter: Übersicht's blur layer drops in and out on re-renders,
 // which reads as the card flickering. A near-opaque fill composites the same
 // on every repaint.
 const panel = css`
-  background: rgba(17, 21, 27, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(var(--pw-bg), var(--pw-opacity));
+  border: 1px solid rgba(var(--pw-fg), 0.08);
   border-radius: 12px;
   padding: 12px 16px 8px;
 `;
@@ -975,7 +1049,7 @@ const tabBtn = css`
 
 const tabActive = css`
   color: ${C.ink};
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--pw-fg), 0.1);
 `;
 
 const dot = css`
@@ -1414,8 +1488,8 @@ const frameBody = css`
   &[data-over="1"] { padding-right: 6px; }
   &::-webkit-scrollbar { width: 6px; }
   &::-webkit-scrollbar-track { background: transparent; }
-  &::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.13); border-radius: 3px; }
-  &::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.24); }
+  &::-webkit-scrollbar-thumb { background: rgba(var(--pw-fg), 0.13); border-radius: 3px; }
+  &::-webkit-scrollbar-thumb:hover { background: rgba(var(--pw-fg), 0.24); }
 `;
 const moveGrip = css`
   position: absolute;
@@ -1500,7 +1574,8 @@ const frame = (state, dispatch, head, body, hover) => {
     if (state.front !== win.id) extra.onMouseDownCapture = () => dispatch({ type: "FRONT", w: win.id });
   }
   return (
-    <div key={win.id} className={frameRoot} style={style} data-pw-root="1" data-pw-win={win.id} data-scale={String(s)} {...hover} {...extra}>
+    <div key={win.id} className={frameRoot + " " + themeClass(themeOf(state), opacityOf(state))} style={style} data-pw-root="1"
+      data-pw-win={win.id} data-pw-theme={themeOf(state)} data-scale={String(s)} {...hover} {...extra}>
       <div className={css`${panel} ${framePanel}`} ref={(el) => fitFrame(el)}
         style={isNumber(Hu) ? { height: Hu + "px" } : undefined}>
         <div className={frameHead} onMouseDown={down("move")}>{head}</div>
@@ -1530,7 +1605,7 @@ const frame = (state, dispatch, head, body, hover) => {
 // Nice round tick values covering [mn, mx], recomputed every render.
 const crisp = (v) => Math.round(v) + 0.5;   // 1px lines on pixel centres
 const LINE_STYLE = { strokeLinejoin: "round", strokeLinecap: "round", shapeRendering: "geometricPrecision" };
-const SURFACE = "#11151B";   // the panel colour: the ring that keeps a marker dot legible on its line
+const SURFACE = "var(--pw-surface)";   // the panel colour: the ring that keeps a marker dot legible on its line
 
 // index of the point nearest to time t (times ascending)
 const nearestIdx = (times, t) => {
@@ -1756,7 +1831,7 @@ const facetCss = css`
   padding: 3px 5px 2px;
   margin: -3px -5px -2px;
   cursor: zoom-in;
-  &:hover { background: rgba(255, 255, 255, 0.055); }
+  &:hover { background: rgba(var(--pw-fg), 0.055); }
 `;
 const isNum = (v) => v !== null && v !== undefined;
 const lastNum = (ser) => {
@@ -2042,7 +2117,7 @@ const squarify = (items, x, y, w, h) => {
 
 // Apple system palette; saturates toward full green/red at the cap for the
 // active range, so a quiet day isn't a wall of neon.
-const NEUTRAL = [44, 44, 46];
+const neutralOf = () => paletteNow().neutral;   // the resting tile, per theme
 const GREEN = [48, 209, 88];
 const RED = [255, 69, 58];
 const AMBER = [245, 180, 60];
@@ -2055,12 +2130,12 @@ const tileColor = (p, range) => {
   const cap = RANGE_CAP[range] || 4;
   const t = Math.min(1, Math.abs(p) / cap);
   const e = Math.pow(t, 0.75);
-  return rgb(mixc(NEUTRAL, p >= 0 ? GREEN : RED, 0.18 + 0.82 * e));
+  return rgb(mixc(neutralOf(), p >= 0 ? GREEN : RED, 0.18 + 0.82 * e));
 };
 // VOL mode: calm = the neutral tile, rising through amber to pink
 const volTileColor = (score) => {
-  if (!score) return rgb(NEUTRAL);
-  if (score <= 6) return rgb(mixc(NEUTRAL, AMBER, 0.08 + ((score - 1) / 5) * 0.62));
+  if (!score) return rgb(neutralOf());
+  if (score <= 6) return rgb(mixc(neutralOf(), AMBER, 0.08 + ((score - 1) / 5) * 0.62));
   return rgb(mixc(AMBER, PINK, (score - 6) / 4 * 0.85));
 };
 
@@ -2069,10 +2144,10 @@ const volTileColor = (score) => {
 const ORANGE = [255, 159, 10];
 const BLUE = [10, 132, 255];
 const driftTileColor = (b) => {
-  if (!b || typeof b.driftPct !== "number" || !isFinite(b.driftPct)) return rgb(NEUTRAL);
+  if (!b || typeof b.driftPct !== "number" || !isFinite(b.driftPct)) return rgb(neutralOf());
   const e = Math.pow(Math.min(1, Math.abs(b.driftPct) / 5), 0.75);
   const k = (0.18 + 0.82 * e) * (b.state === "ok" ? 0.5 : 1);
-  return rgb(mixc(NEUTRAL, b.driftPct >= 0 ? ORANGE : BLUE, k));
+  return rgb(mixc(neutralOf(), b.driftPct >= 0 ? ORANGE : BLUE, k));
 };
 const driftTip = (b) => (!b ? "no target" : (b.kind === "sector" ? b.key + " sector: " : "") +
   "drift " + fmtPts(b.driftPct) + " pts vs target " + fmtTarget(b.targetPct));
@@ -2147,17 +2222,17 @@ const Heatmap = ({ positions, range, w, h, onSelect, d }) => {
             borderRadius: Math.min(6, Math.max(2, minSide * 0.12)) + "px",
             display: "flex", flexDirection: "column", alignItems: "center",
             justifyContent: "center", overflow: "hidden",
-            boxShadow: "inset 0 0.5px 0 rgba(255,255,255,0.07)",
+            boxShadow: "inset 0 0.5px 0 rgba(var(--pw-fg),0.07)",
           }}>
           {showTicker ? (
             <div style={{ fontSize: tickerFs + "px", fontWeight: 700,
-              color: "rgba(255,255,255,0.94)", lineHeight: 1.1,
-              textShadow: "0 1px 2px rgba(0,0,0,0.35)" }}>{r.ticker}</div>
+              color: "var(--pw-tile-ink)", lineHeight: 1.1,
+              textShadow: "var(--pw-tile-shadow)" }}>{r.ticker}</div>
           ) : null}
           {showSub ? (
             <div style={{ fontSize: subFs + "px", fontWeight: 500,
-              color: "rgba(255,255,255,0.78)", lineHeight: 1.2,
-              textShadow: "0 1px 2px rgba(0,0,0,0.35)" }}>
+              color: "var(--pw-tile-sub)", lineHeight: 1.2,
+              textShadow: "var(--pw-tile-shadow)" }}>
               {isDrift ? (bk ? fmtPts(bk.driftPct) + " pt" : "—") : isVol ? (r.volScore ? "vol " + r.volScore : "—") : pct(chg)}
             </div>
           ) : null}
@@ -2192,8 +2267,8 @@ const MapTabs = ({ state, dispatch, extra, drift, range }) => (
 
 // ------------------------------------------------------------------ buy / sell
 const inputCss = css`
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(var(--pw-fg), 0.06);
+  border: 1px solid rgba(var(--pw-fg), 0.12);
   border-radius: 4px;
   color: ${C.ink};
   font-family: "SF Mono", Menlo, monospace;
@@ -2206,8 +2281,8 @@ const inputCss = css`
 
 // Yahoo symbols: MSFT, BRK-B, SHOP.TO, 0700.HK, M&M.NS, BTC-USD, GC=F, ^GSPC
 const dayInputCss = css`
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(var(--pw-fg), 0.06);
+  border: 1px solid rgba(var(--pw-fg), 0.12);
   border-radius: 4px;
   color: ${C.ink};
   font-family: "SF Mono", Menlo, monospace;
@@ -2876,16 +2951,16 @@ const submitBenchInput = (text, hidden, dispatch) => {
 const benchPickCss = css`
   margin: 3px auto 0;
   padding: 5px 7px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(var(--pw-fg), 0.12);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--pw-fg), 0.03);
   max-height: 176px;
   overflow-y: auto;
   box-sizing: border-box;
   width: 100%;
   max-width: 560px;
   &::-webkit-scrollbar { width: 6px; }
-  &::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.13); border-radius: 3px; }
+  &::-webkit-scrollbar-thumb { background: rgba(var(--pw-fg), 0.13); border-radius: 3px; }
 `;
 const benchRowCss = css`
   display: flex;
@@ -2897,7 +2972,7 @@ const benchRowCss = css`
   white-space: nowrap;
   overflow: hidden;
   font-size: 8.5px;
-  &:hover { background: rgba(255, 255, 255, 0.07); }
+  &:hover { background: rgba(var(--pw-fg), 0.07); }
 `;
 const BenchRow = ({ sym, label, on, onPick }) => (
   <div className={css`${mono} ${benchRowCss}`} onClick={onPick} title={on ? "the index you compare with now" : "compare with " + sym}>
@@ -2977,7 +3052,7 @@ const suggestRow = css`
   padding: 3px 6px;
   cursor: pointer;
   font-size: 9.5px;
-  &:hover { background: rgba(255, 255, 255, 0.07); }
+  &:hover { background: rgba(var(--pw-fg), 0.07); }
 `;
 
 const Suggestions = ({ state, dispatch }) => {
@@ -3008,7 +3083,9 @@ const Suggestions = ({ state, dispatch }) => {
   return note ? <div className={css`${mono} font-size:8.5px; color:${C.dim}; margin-top:4px;`}>{note}</div> : null;
 };
 
-const AddForm = ({ state, dispatch, empty, positions }) => (
+const AddForm = (props) => (props.state.imp && props.state.imp.open
+  ? <ImportPanel state={props.state} dispatch={props.dispatch} /> : <AddFormMain {...props} />);
+const AddFormMain = ({ state, dispatch, empty, positions }) => (
   <div className={css`margin-top:6px; padding:7px; border:1px solid ${C.faint}; border-radius:8px;`}>
     <div className={css`display:flex; gap:6px;`}>
       <input className={inputCss} placeholder="stock: name or ticker" value={state.addForm.ticker}
@@ -3071,6 +3148,8 @@ const AddForm = ({ state, dispatch, empty, positions }) => (
     <div className={rowFlex} style={{ marginTop: 5 }}>
       <span className={linkBtn} title="show positions.json in Finder — edit it with any text editor"
         onClick={() => run(`open -R ${shq(DIR + "/positions.json")}`)}>show file</span>
+      <span className={linkBtn} title="add many holdings at once: paste a list, or pick a CSV file exported from your broker"
+        data-pw-import-open="1" onClick={() => openImport(state, dispatch)}>import a list…</span>
       {empty ? null : (
         <span className={linkBtn} title="remove every holding (your old file is kept as a backup)"
           onClick={() => dispatch({ type: "SET_PENDING", pending: {
@@ -3080,6 +3159,140 @@ const AddForm = ({ state, dispatch, empty, positions }) => (
     </div>
   </div>
 );
+
+// ---- import (13.4): many holdings at once — a pasted list or a CSV file
+// (import_positions.py: "preview" shows what would be added, "commit" adds)
+const welcomeCss = css`
+  margin-top: 8px;
+  padding: 7px 10px 8px;
+  border: 1px solid rgba(var(--pw-fg), 0.14);
+  border-radius: 8px;
+  background: rgba(var(--pw-fg), 0.04);
+  font-size: 10px;
+  line-height: 1.5;
+`;
+const welcomeLine = css`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  margin-top: 2px;
+  min-width: 0;
+`;
+const importH = (st) => (st.imp && st.imp.open ? LAYOUT_K.IMPORT + Math.min(12, (st.imp.rows || []).length) * LAYOUT_K.ROW_LINE : 0);
+const openImport = (state, dispatch) => {
+  if (!state.showAdd) dispatch({ type: "TOGGLE_ADD" });
+  dispatch({ type: "IMPORT_SET", imp: { open: true, rows: null, msg: null, busy: false } });
+};
+const importArgs = (imp) => (imp.file ? ["--file", imp.file] : ["--text", imp.text || ""]);
+const importPreview = (state, dispatch) => {
+  const imp = state.imp || IMPORT_EMPTY;
+  if (!imp.file && !(imp.text || "").trim()) return dispatch({ type: "IMPORT_SET", imp: { msg: "paste a list first, or pick a file" } });
+  dispatch({ type: "IMPORT_SET", imp: { busy: true, msg: "reading…", rows: null } });
+  run(helper(["import", "preview"].concat(importArgs(imp)))).then((out) => {
+    const r = parseJson(String(out).trim());
+    if (!r || (r.error && !(r.rows || []).length)) {
+      return dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: (r && r.error) || "could not read the list" } });
+    }
+    dispatch({ type: "IMPORT_SET", imp: { busy: false, rows: r.rows || [], ok: r.ok || 0, skipped: r.skipped || 0, format: r.format || null,
+      msg: r.ok ? null : "no holding found — one per line: ticker and shares (KO 10)" } });
+  }, (e) => dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: "could not read the list: " + String(e).slice(0, 60) } }));
+};
+const importCommit = (state, dispatch) => {
+  const imp = state.imp || IMPORT_EMPTY;
+  dispatch({ type: "IMPORT_SET", imp: { busy: true, msg: "adding…" } });
+  run(helper(["import", "commit"].concat(importArgs(imp)))).then((out) => {
+    const r = parseJson(String(out).trim());
+    if (!r || r.error) return dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: (r && r.error) || "could not add them" } });
+    dispatch({ type: "IMPORT_SET", imp: null });
+    dispatch({ type: "FORM_RESET" });
+    const n = r.added || 0, k = r.skipped || 0;
+    say(dispatch, "added " + n + " holding" + (n === 1 ? "" : "s") + (k ? " (" + k + " line" + (k === 1 ? "" : "s") + " skipped)" : "") +
+      " — prices come with the next refresh" + (r.backup ? "; the old file is kept as a backup" : ""));
+  }, (e) => dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: "could not add them: " + String(e).slice(0, 60) } }));
+};
+const importChoose = (dispatch) => {
+  dispatch({ type: "IMPORT_SET", imp: { busy: true, msg: "pick the file in the dialog…" } });
+  run(helper(["import", "choose"])).then((out) => {
+    const r = parseJson(String(out).trim());
+    if (r && r.file) {
+      dispatch({ type: "IMPORT_SET", imp: { busy: false, file: r.file, text: "", rows: null, msg: null } });
+      importPreview({ imp: Object.assign({}, IMPORT_EMPTY, { file: r.file }) }, dispatch);
+    } else {
+      dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: r && r.cancelled ? null : "no file picked" } });
+    }
+  }, () => dispatch({ type: "IMPORT_SET", imp: { busy: false, msg: "the file dialog failed" } }));
+};
+const ImportPanel = ({ state, dispatch }) => {
+  const imp = state.imp || IMPORT_EMPTY;
+  const rows = imp.rows || [];
+  const shown = rows.slice(0, 12);
+  const fileName = imp.file ? String(imp.file).split("/").pop() : null;
+  const okN = imp.ok || 0, skipN = imp.skipped || 0;
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+  return (
+    <div className={css`margin-top:6px; padding:7px; border:1px solid ${C.faint}; border-radius:8px;`} data-pw-import="1">
+      <div className={rowFlex} style={{ alignItems: "baseline" }}>
+        <span className={eyebrow}>import a list</span>
+        <span style={{ whiteSpace: "nowrap" }}>
+          <span className={tabBtn} title="pick a CSV or text file — your broker's export, for example" data-pw-import-choose="1"
+            onClick={() => { if (!imp.busy) importChoose(dispatch); }}>choose a file…</span>
+          <span className={tabBtn} title="back to the + form" data-pw-import-close="1" onClick={() => dispatch({ type: "IMPORT_SET", imp: null })}>×</span>
+        </span>
+      </div>
+      {fileName ? (
+        <div className={css`${mono} font-size:8.5px; color:${C.dim}; margin-top:3px;`}>{"file: " + fileName}
+          <span className={linkBtn} style={{ marginLeft: 6 }} onClick={() => dispatch({ type: "IMPORT_SET", imp: { file: null, rows: null, msg: null } })}>paste instead</span>
+        </div>
+      ) : (
+        <textarea className={inputCss} rows={4} value={imp.text || ""} data-pw-import-text="1"
+          placeholder={"one holding per line, like:\nAAPL 10\nMSFT 5 at 310 on 2024-03-01\n…or paste your broker's CSV export"}
+          style={{ width: "100%", boxSizing: "border-box", marginTop: 4, resize: "vertical", fontFamily: '"SF Mono", Menlo, monospace', fontSize: 9.5, lineHeight: 1.4 }}
+          onChange={(ev) => dispatch({ type: "IMPORT_SET", imp: { text: ev.target.value, rows: null } })} />
+      )}
+      {rows.length ? (
+        <div className={css`${mono} font-size:8.5px; margin-top:4px;`} data-pw-import-rows={rows.length}>
+          <div style={{ color: C.dim }}>{plural(okN, "holding") + " found" + (skipN ? " · " + plural(skipN, "line") + " skipped" : "")}</div>
+          {shown.map((r, i) => (
+            <div key={i} className={rowFlex} style={{ color: r.ok ? C.ink : C.dim, columnGap: 8, justifyContent: "flex-start" }} title={r.text || ""}>
+              <span style={{ width: 64, flex: "none", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.ticker || "—"}</span>
+              <span style={{ width: 54, flex: "none", textAlign: "right" }}>{r.ok ? fmtShares(r.shares) : ""}</span>
+              <span style={{ width: 72, flex: "none", textAlign: "right" }}>{r.ok ? (r.cost != null ? num(r.cost, 2) : "day's close") : ""}</span>
+              <span style={{ width: 70, flex: "none" }}>{r.ok ? (r.date || "today") : ""}</span>
+              <span style={{ color: r.ok ? C.dim : C.amber, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.ok ? (r.note || "") : "line " + r.line + ": " + r.note}</span>
+            </div>
+          ))}
+          {rows.length > shown.length ? <div style={{ color: C.dim }}>{"+ " + (rows.length - shown.length) + " more"}</div> : null}
+        </div>
+      ) : null}
+      <div className={rowFlex} style={{ marginTop: 6 }}>
+        <span className={css`${mono} font-size:8.5px; line-height:1.4; max-width: 250px;`} style={{ color: imp.msg && !imp.busy ? C.amber : C.dim }} data-pw-import-msg="1">
+          {imp.msg || (rows.length ? "price = what you paid per share; none = that day's close"
+            : "ticker and shares on each line — then the price you paid and the date, if you have them")}
+        </span>
+        <span style={{ whiteSpace: "nowrap" }}>
+          {rows.length && okN ? (
+            <span className={css`${tabBtn} ${tabActive}`} title="write these holdings into positions.json (the old file is kept as a backup)" data-pw-import-commit="1"
+              onClick={() => { if (!imp.busy) importCommit(state, dispatch); }}>{"add " + plural(okN, "holding")}</span>
+          ) : (
+            <span className={css`${tabBtn} ${tabActive}`} title="read the list and show what would be added" data-pw-import-preview="1"
+              onClick={() => { if (!imp.busy) importPreview(state, dispatch); }}>preview</span>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+};
+// ---- the update offer's "yes" (13.4): widget_command.sh update run -> update.sh
+const runUpdate = (upd, dispatch) => {
+  dispatch({ type: "UPDATE_ASK", on: false });
+  dispatch({ type: "UPDATE_MSG", msg: "updating… (the widget reloads in a moment)" });
+  run(helper(["update", "run"].concat(upd && upd.zip ? [upd.zip] : []))).then((out) => {
+    const r = parseJson(String(out).trim());
+    if (r && r.ok === false) dispatch({ type: "UPDATE_MSG", msg: "update failed: " + String(r.message || "").slice(0, 90), err: true });
+  }, (e) => dispatch({ type: "UPDATE_MSG", msg: "update failed: " + String(e).slice(0, 60), err: true }));
+};
 
 // ------------------------------------------------------------------ detail
 const PriceChart = ({ series, values, refLine, w }) => {
@@ -3838,7 +4051,7 @@ const newsTagCss = css`
 const newsChipCss = css`
   font-family: "SF Mono", Menlo, monospace;
   font-size: 8px; color: ${C.dim}; cursor: pointer; padding: 0 3px; border-radius: 3px;
-  background: rgba(255, 255, 255, 0.06); white-space: nowrap;
+  background: rgba(var(--pw-fg), 0.06); white-space: nowrap;
   &:hover { color: ${C.ink}; }
 `;
 
@@ -4099,7 +4312,7 @@ const SectionDays = ({ d, state, dispatch, daily, rows: perPage }) => {
             onClick={() => dispatch(picked ? { type: "SET_MARK", mark: null }
               : { type: "PICK_DAY", mark: dayMark(r), range: pickRange(r[1], d) })}
             style={{ marginTop: 3, cursor: "pointer", borderRadius: 3, padding: "0 2px",
-              background: picked ? "rgba(255,255,255,0.08)" : "transparent" }}>
+              background: picked ? "rgba(var(--pw-fg),0.08)" : "transparent" }}>
             <span className={mono} style={{ fontSize: 9.5, color: C.dim, width: 84, whiteSpace: "nowrap" }}>{label(r[0])}</span>
             <span className={mono} style={{ fontSize: 9.5 }}>
               {r[3] ? <span style={{ color: C.dim }}>≈ </span> : null}{money(r[2], true)}
@@ -4454,6 +4667,7 @@ const layoutFor = (win, ctx, K0) => {
     let T = 0, first = true;
     const add = (h) => { if (h > 0) { T += (first ? 0 : K.GAP) + h; first = false; } };
     add(headH(st.show, false));
+    add(ctx.welcome ? K.WELCOME : 0);   // the welcome card (13.4)
     add(graphBlockH(st.show, st.gH));
     add(st.lay.cols.reduce((m, c, i) => Math.max(m, colH(st.lay, i, st.R)), 0));
     add((st.show.footer || ctx.warn ? K.FOOTER : 0) + (ctx.loading ? K.LOADING : 0));   // (its red warnings stay)
@@ -4749,9 +4963,9 @@ const armEditKeys = (on, dispatch) => {
 const edBox = css`
   margin: 2px 0 10px;
   padding: 5px 8px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(var(--pw-fg), 0.14);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--pw-fg), 0.03);
   font-family: "SF Mono", Menlo, monospace;
   font-size: 9.5px;
   line-height: 1.45;
@@ -4778,7 +4992,7 @@ const edCaption = css`
   column-gap: 6px;
   margin-top: 8px;
   padding-top: 5px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(var(--pw-fg), 0.08);
   color: ${C.dim};
   min-width: 0;
 `;
@@ -4809,7 +5023,7 @@ const edChip = css`
 `;
 const edChipOn = css`
   color: ${C.ink};
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--pw-fg), 0.1);
 `;
 const edNum = { width: 50, fontSize: 9.5, padding: "1px 4px", flex: "none" };
 const edText = { flex: "1 1 80px", minWidth: 0, fontSize: 9.5, padding: "1px 4px" };
@@ -4851,6 +5065,45 @@ BENCH_GROUPS.forEach((g) => g.items.forEach((it) => { BENCH_NAME[it[0]] = it[1];
 // sent once, until the reply is back (then a retry after an error works)
 const edSent = {};
 
+// 13.4: the ⚙ editor's "updates" row — what the last check found
+const OPACITY_CHIPS = [["solid", 1, "no see-through at all"], ["normal", 0.88, "a little see-through (the usual look)"],
+  ["lighter", 0.7, "the desktop shows through a bit"], ["glass", 0.5, "mostly see-through"]];
+const updateNoteOf = (d, state) => {
+  const u = d && d.update && typeof d.update === "object" ? d.update : null;
+  if (state.updateChecking) return null;
+  if (!u) return uiPrefs(state).updates === false ? "not checking" : "not checked yet — it happens at the next refresh";
+  const when = isFin(u.checked) ? " (checked " + fmtAge(Math.max(0, Math.round(Date.now() / 1000 - u.checked))) + " ago)" : "";
+  if (!u.latest) return u.ok === false ? "the last check failed — GitHub unreachable?" + when : "nothing known yet" + when;
+  if (newerVersion(u.latest, VERSION)) return u.latest + " is out — update in the bottom row" + when;
+  return "you have the newest version" + (u.ok === false ? " — the last check failed" : "") + when;
+};
+// "13.10" is newer than "13.4"; parts compared as numbers
+const newerVersion = (a, b) => {
+  const pa = String(a || "").split("."), pb = String(b || "").split(".");
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = Number(pa[i] || 0), y = Number(pb[i] || 0);
+    if (!isFinite(x) || !isFinite(y)) return false;
+    if (x !== y) return x > y;
+  }
+  return false;
+};
+const checkUpdateNow = (dispatch) => {
+  dispatch({ type: "UPDATE_CHECKING", on: true });
+  run(helper(["update", "check"])).then((out) => {
+    const r = parseJson(String(out).trim());
+    dispatch({ type: "UPDATE_INFO", info: r && !r.error ? r : { latest: null, ok: false, checked: Math.round(Date.now() / 1000) } });
+  }, () => dispatch({ type: "UPDATE_INFO", info: { latest: null, ok: false, checked: Math.round(Date.now() / 1000) } }));
+};
+// "reset portfolio settings": ONE run of `setting portfolio reset-all`; the
+// reply's ui values go into data.ui at once, this session's clicks are dropped
+const resetPortfolioSettings = (dispatch) => runQueued(["setting", "portfolio", "reset-all"]).then((out) => {
+  const r = parseJson(String(out).trim());
+  if (!r || r.error) return dispatch({ type: "EDIT_MSG", key: "portfolio", msg: (r && r.error) || "could not reset" });
+  dispatch({ type: "PF_RESET_LOCAL" });
+  Object.keys(r.ui || {}).forEach((k) => dispatch({ type: "UI_PATCH", key: k, value: r.ui[k] }));
+  dispatch({ type: "EDIT_MSG", key: "portfolio", msg: null });
+}, () => dispatch({ type: "EDIT_MSG", key: "portfolio", msg: "could not reset" }));
+
 // state = the window's view, L = its layout (null in the one-line view),
 // has = id -> false when the data has nothing for it yet
 const editorNode = (state, dispatch, d, L, has) => {
@@ -4866,6 +5119,16 @@ const editorNode = (state, dispatch, d, L, has) => {
   const confirm = state.editConfirm;
   const hints = state.editHints !== false;
   const adv = state.editAdvanced === true;
+  // the search box (13.4): with a word typed, every group shows only the rows
+  // whose label, hint or key carries it; a group with no such row goes
+  const q = String(state.editQuery || "").trim().toLowerCase();
+  const matches = (...texts) => !q || texts.some((t) => String(t || "").toLowerCase().indexOf(q) >= 0);
+  const wrow = (words, node) => (matches(words) ? node : null);
+  // does a rendered group body hold anything (its children, nested arrays included)?
+  const hasKids = (node) => {
+    const walk = (k) => (Array.isArray(k) ? k.some(walk) : k !== null && k !== undefined && k !== false && k !== "");
+    return !!(node && node.props && walk(node.props.children));
+  };
   const ui = uiPrefs(state);
   const half = G.Wu - LAYOUT_K.PAD_X >= 860;   // two columns only where a panel row (chips and all) fits on one line
   const set = itemSetOf(winItems(dw));
@@ -4875,16 +5138,21 @@ const editorNode = (state, dispatch, d, L, has) => {
     <span key={key || label} className={on ? css`${edChip} ${edChipOn}` : edChip} onClick={onClick} title={title || undefined}
       data-pw-edchip={pw && pw.chip} data-pw-prio={pw && pw.prio} data-pw-edctl={pw && pw.ctl} data-pw-edadv={pw && pw.adv} data-pw-edhints={pw && pw.hints}>{label}</span>
   );
-  const group = (key, label, body, tip) => (
-    <div key={key}>
-      <div className={open === key ? css`${edHead} ${edHeadOn}` : edHead} data-pw-edgroup={key} title={tip || undefined}
-        onClick={() => dispatch({ type: "EDIT_GROUP", group: open === key ? "none" : key })}>
-        {(open === key ? "▾ " : "▸ ") + label}
+  const group = (key, label, body, tip) => {
+    const isOpen = q ? true : open === key;
+    const node = isOpen ? body() : null;
+    if (q && !hasKids(node)) return null;   // nothing in here matches
+    return (
+      <div key={key}>
+        <div className={isOpen ? css`${edHead} ${edHeadOn}` : edHead} data-pw-edgroup={key} title={tip || undefined}
+          onClick={() => { if (!q) dispatch({ type: "EDIT_GROUP", group: open === key ? "none" : key }); }}>
+          {(isOpen ? "▾ " : "▸ ") + label}
+        </div>
+        {isOpen && hints && !q && EDIT_HINTS[key] ? <div className={edHint}>{EDIT_HINTS[key]}</div> : null}
+        {node}
       </div>
-      {open === key && hints && EDIT_HINTS[key] ? <div className={edHint}>{EDIT_HINTS[key]}</div> : null}
-      {open === key ? body() : null}
-    </div>
-  );
+    );
+  };
 
   // ---- portfolio: _settings the file used to be the only way to (13.2)
   const msgOf = (key) => (state.editMsg && state.editMsg[key]) || null;
@@ -4896,7 +5164,7 @@ const editorNode = (state, dispatch, d, L, has) => {
       <div key={"msg:" + key} className={edLine} data-pw-edmsg={key} style={{ marginTop: 1 }}><span style={m ? edMsg : edNote}>{m || n}</span></div>
     ) : null;
   };
-  const srow = (key, label, body, hint, extraMsg) => (
+  const srow = (key, label, body, hint, extraMsg) => !matches(key, label, hint) ? null : (
     <div key={"s:" + key} data-pw-edsetting={key}>
       <div className={edLine}><span style={edDim}>{label}</span>{body}</div>
       {hints && hint ? <div className={edHint}>{hint}</div> : null}
@@ -4970,6 +5238,11 @@ const editorNode = (state, dispatch, d, L, has) => {
       title={lo + "–" + hi + " % (Enter)"} onKeyDown={(ev) => { if (isEnter(ev)) thrCommit(key, lo, hi, cur)(ev); }} onBlur={thrCommit(key, lo, hi, cur)} />
   );
   const rbNow = typeof state.rebalWhole === "boolean" ? state.rebalWhole : typeof ui.rebalanceWhole === "boolean" ? ui.rebalanceWhole : null;
+  // appearance and the update check (13.4)
+  const themeSaved = typeof ui.theme === "string" && THEMES.indexOf(ui.theme) >= 0 ? ui.theme : "dark";
+  const opNow = opacityOf(state);
+  const updOn = ui.updates !== false;
+  const updateNote = updateNoteOf(d, state);
   const portfolioBody = () => (
     <div>
       {srow("title", "portfolio name", [
@@ -5022,7 +5295,33 @@ const editorNode = (state, dispatch, d, L, has) => {
         chip("fractions of a share", rbNow === false, () => saveRebalWhole(false, dispatch), undefined, "rb:false", { chip: "false" }),
         chip("let the widget choose", rbNow === null, () => saveRebalWhole(null, dispatch), "whole shares when every holding is a whole number of shares", "rb:default", { chip: "default" }),
       ], "how the rebalance panel rounds its buy / sell amounts")}
-      <div className={edHint} style={{ marginTop: 4 }}>Target share of each holding (for rebalancing): still edited in the positions file — see README.</div>
+      {wrow("targets rebalancing target share", <div key="tgt" className={edHint} style={{ marginTop: 4 }}>Target share of each holding (for rebalancing): still edited in the positions file — see README.</div>)}
+      {srow("theme", "look", [
+        chip("dark", themeSaved === "dark", () => save("theme", "dark"), "light text on a dark card", "th:dark", { chip: "dark" }),
+        chip("light", themeSaved === "light", () => save("theme", "light"), "dark text on a light card", "th:light", { chip: "light" }),
+        chip("follow my Mac", themeSaved === "auto", () => save("theme", "auto"),
+          "dark or light with the Mac's appearance (System Settings → Appearance)", "th:auto", { chip: "auto" }),
+      ], "Dark, light, or whatever the Mac is set to.")}
+      {srow("opacity", "background", OPACITY_CHIPS.map((o) => chip(o[0], opNow === o[1], () => save("opacity", String(o[1])), o[2], "op:" + o[0], { chip: String(o[1]) }))
+        .concat(OPACITY_CHIPS.some((o) => o[1] === opNow) ? [] : [chip("custom (" + Math.round(opNow * 100) + " %)", true, () => null,
+          "set in the positions file (opacity)", "op:custom", { chip: "custom" })]),
+        "How solid the window is — glass lets the desktop show through.")}
+      {srow("updates", "updates", [
+        chip("check once a day", updOn, () => save("updates", "true"),
+          "asks GitHub for the newest version once a day — one plain request, nothing about you in it", "up:on", { chip: "true" }),
+        chip("never", !updOn, () => save("updates", "false"), "no requests to GitHub; look at the releases page yourself", "up:off", { chip: "false" }),
+        chip(state.updateChecking ? "checking…" : "check now", false, () => { if (!state.updateChecking) checkUpdateNow(dispatch); }, "ask GitHub right now", "up:now", { chip: "now" }),
+      ], "You have " + VERSION + ". A newer version is offered in the bottom row; one click installs it and keeps your holdings.", updateNote)}
+      {wrow("reset portfolio settings defaults", (
+        <div key="pfreset" className={edLine} data-pw-edsetting="portfolio">
+          {confirm === "pfreset" ? [
+            <span key="q" style={{ color: C.down, minWidth: 0, whiteSpace: "normal" }}>currency, history, index, headlines, alerts, rebalancing, look and updates back to the defaults? (your holdings, the name and the windows stay)</span>,
+            chip("yes, reset them", false, () => { dispatch({ type: "EDIT_CONFIRM", what: null }); resetPortfolioSettings(dispatch); }, undefined, "pf:yes", { chip: "yes" }),
+            chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "pf:no", { chip: "no" }),
+          ] : chip("reset portfolio settings", false, () => dispatch({ type: "EDIT_CONFIRM", what: "pfreset" }),
+            "every setting in this group back to its default — holdings, name, targets and windows stay", "pf:reset", { chip: "reset" })}
+        </div>
+      ))}
     </div>
   );
 
@@ -5068,19 +5367,19 @@ const editorNode = (state, dispatch, d, L, has) => {
   };
   const winBody = () => (
     <div>
-      <div className={edLine}>
+      {wrow("window name", <div key="wname" className={edLine}>
         <span style={edDim}>window name</span>
         <input className={inputCss} style={edText}
           key={"title:" + (dw.title || "")} defaultValue={dw.title || ""} placeholder={pfName} maxLength={40}
           title="this window's name (Enter to keep it)"
           onKeyDown={(ev) => { if (isEnter(ev)) commitTitle(ev); }} onBlur={commitTitle} />
-      </div>
-      {hints ? <div className={edHint}>empty = the portfolio's name</div> : null}
-      <div className={edLine}>
+      </div>)}
+      {hints && matches("window name") ? <div className={edHint}>empty = the portfolio's name</div> : null}
+      {wrow("collapse to one line compact", <div key="compact" className={edLine}>
         {chip((dw.compact === true ? "☑ " : "☐ ") + "collapse to one line", dw.compact === true, () => setWin({ compact: dw.compact === true ? undefined : true }),
           "just the name, value and today's change — or click the title", "compact")}
-      </div>
-      <div className={edLine}>
+      </div>)}
+      {wrow("size narrow normal wide custom width height", <div key="size" className={edLine}>
         <span style={edDim}>size</span>
         {SIZE_PRESETS.map((p) => chip(p[0] + " (" + p[1] + ")", !sizeCustom && preset === p, () => {
           dispatch({ type: "EDIT_CONFIRM", what: null });
@@ -5088,8 +5387,8 @@ const editorNode = (state, dispatch, d, L, has) => {
         }, p[1] + " px wide, as tall as its content", "size:" + p[0], { chip: p[0] }))}
         {chip("custom", sizeCustom, () => dispatch({ type: "EDIT_CONFIRM", what: sizeCustom ? null : "size:custom" }),
           "type the width and height", "size:custom", { chip: "custom" })}
-      </div>
-      {sizeCustom ? (
+      </div>)}
+      {sizeCustom && matches("size width height custom") ? (
         <div className={edLine}>
           <span style={edDim}>width</span>
           <input className={inputCss} style={edNum} key={"w:" + wNow} defaultValue={String(wNow)} inputMode="numeric"
@@ -5104,7 +5403,7 @@ const editorNode = (state, dispatch, d, L, has) => {
           }), "as tall as its content (a fixed height hides panels that don't fit)", "fit")}
         </div>
       ) : null}
-      <div className={edLine}>
+      {wrow("zoom bigger smaller", <div key="zoom" className={edLine}>
         <span style={edDim}>zoom</span>
         <span style={edDim}>smaller</span>
         <input type="range" min="60" max="160" step="5" key={"z:" + zSaved} defaultValue={String(Math.round(zSaved * 100))}
@@ -5114,13 +5413,13 @@ const editorNode = (state, dispatch, d, L, has) => {
           onMouseUp={zoomCommit} onKeyUp={zoomCommit} onTouchEnd={zoomCommit} />
         <span style={edDim}>bigger</span>
         <span style={edDim}>{Math.round(zNow * 100) + " %"}</span>
-      </div>
-      <div className={edLine}>
+      </div>)}
+      {wrow("left carousel rotate stack today sectors risk days", <div key="car" className={edLine}>
         <span style={edDim}>left carousel</span>
         {chip("rotate", dw.carousel !== "stack", () => setWin({ carousel: undefined }), "today · sectors · risk · days take turns", "car:rotate")}
         {chip("stack", dw.carousel === "stack", () => setWin({ carousel: "stack" }), "all of them, one under the other", "car:stack")}
-      </div>
-      <div className={edLine}>
+      </div>)}
+      {wrow("new window duplicate remove delete template", <div key="winops" className={edLine}>
         {base.windows.length < MAX_WINDOWS
           ? chip("+ new window ▾", confirm === "new", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "new" ? null : "new" }),
             "another window on the desktop, from a template")
@@ -5130,7 +5429,7 @@ const editorNode = (state, dispatch, d, L, has) => {
         {base.windows.length > 1
           ? chip("remove this window", confirm === "delete", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "delete" ? null : "delete" }), "close and forget this window")
           : null}
-      </div>
+      </div>)}
       {confirm === "new" ? (
         <div data-pw-edmenu="new">
           {TEMPLATES.map((t) => (
@@ -5152,7 +5451,7 @@ const editorNode = (state, dispatch, d, L, has) => {
           {chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "del:no")}
         </div>
       ) : null}
-      <div className={edLine}>
+      {wrow("reset this window reset all windows standard", <div key="winreset" className={edLine}>
         {confirm === "resetwin" ? (
           <span style={{ color: C.down, minWidth: 0 }}>this window back to the standard size, zoom and content?</span>
         ) : null}
@@ -5170,7 +5469,7 @@ const editorNode = (state, dispatch, d, L, has) => {
              chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "reset:no")]
           : chip("reset all windows", false, () => dispatch({ type: "EDIT_CONFIRM", what: "reset" }),
             "back to the standard look: one window, everything shown, the default spot, size and zoom")}
-      </div>
+      </div>)}
     </div>
   );
 
@@ -5184,7 +5483,7 @@ const editorNode = (state, dispatch, d, L, has) => {
   const chipRow = (label, ids, depth) => (
     <div key={"chips:" + label} className={edLine} style={{ width: "100%", paddingLeft: depth * 10, boxSizing: "border-box" }}>
       <span style={edDim}>{label}</span>
-      {ids.map((fid) => chip(FEATURE_BY[fid].label, set[fid] === true, toggle(fid),
+      {ids.filter((fid) => matches(label, FEATURE_BY[fid].label, FEATURE_BY[fid].tip, fid)).map((fid) => chip(FEATURE_BY[fid].label, set[fid] === true, toggle(fid),
         FEATURE_BY[fid].tip + (set[fid] ? " — shown, click to hide" : " — hidden, click to show"), fid))}
     </div>
   );
@@ -5293,10 +5592,14 @@ const editorNode = (state, dispatch, d, L, has) => {
     const out = [];
     FEATURES.forEach((f) => {
       if (editGroupOf(f.id) !== key || /^graph\.(range|mode)\./.test(f.id)) return;
+      const ranges = f.id === "graph.tabs" ? FEATURES.filter((g) => g.parent === "graph.tabs" && /^graph\.range\./.test(g.id)).map((g) => g.id) : [];
+      const modes = f.id === "graph.modes" ? ["graph.mode.value", "graph.mode.pl", "graph.mode.sectors"] : [];
+      const sub = ranges.concat(modes).some((fid) => matches(FEATURE_BY[fid].label, FEATURE_BY[fid].tip, fid));
+      if (!matches(f.label, f.tip, f.id) && !sub) return;   // the search box (13.4)
       out.push(featureRow(f));
-      if (f.id === "panel.news" && set["panel.news"] === true) out.push(newsEditorNode());
-      if (f.id === "graph.tabs") out.push(chipRow("ranges", FEATURES.filter((g) => g.parent === "graph.tabs" && /^graph\.range\./.test(g.id)).map((g) => g.id), 2));
-      if (f.id === "graph.modes") out.push(chipRow("modes", ["graph.mode.value", "graph.mode.pl", "graph.mode.sectors"], 3));
+      if (f.id === "panel.news" && set["panel.news"] === true && !q) out.push(newsEditorNode());
+      if (ranges.length && (sub || !q)) out.push(chipRow("ranges", ranges, 2));
+      if (modes.length && (sub || !q)) out.push(chipRow("modes", modes, 3));
     });
     return <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline" }}>{out}</div>;
   };
@@ -5304,6 +5607,13 @@ const editorNode = (state, dispatch, d, L, has) => {
   const countOff = (key) => FEATURES.filter((f) => editGroupOf(f.id) === key && !set[f.id]).length;
   const groupLabel = (g) => g[1] + (countOff(g[0]) ? " · " + countOff(g[0]) + " off" : "");
   const pfHead = "Portfolio · " + (d.currency || "auto") + " · " + HISTORY_LABELS[btNow];
+  // while searching: does any feature row match (the "What it shows" caption), does anything at all
+  const anyFeature = !q || FEATURES.some((f) => matches(f.label, f.tip, f.id));
+  const PF_WORDS = ["portfolio name title", "currency", "backtestYears history", "benchmark compare with an index", "news headlines", "alerts big-move",
+    "alertThreshold portfolioAlertThreshold", "rebalanceWhole rebalancing suggests", "targets", "theme look", "opacity background", "updates", "reset portfolio settings defaults"];
+  const WIN_WORDS = ["window name", "collapse to one line compact", "size narrow normal wide custom width height", "zoom bigger smaller", "left carousel rotate stack",
+    "new window duplicate remove delete template", "reset this window reset all windows standard"];
+  const anyMatch = !q || anyFeature || PF_WORDS.some((w) => matches(w)) || WIN_WORDS.some((w) => matches(w));
   const winHead = "This window" + (base.windows.length > 1 ? " · " + base.windows.length + " open" : "")
     + " · " + G.Wu + " × " + (isNumber(G.Hu) ? G.Hu : "fit");
 
@@ -5311,20 +5621,25 @@ const editorNode = (state, dispatch, d, L, has) => {
     <div className={edBox} data-pw-editor={id}>
       <div className={rowFlex} style={{ alignItems: "baseline", columnGap: 6 }}>
         <span style={Object.assign({ flex: "1 1 auto", color: C.ink }, edLabel)} title="settings: the portfolio, this window and what it shows">{"⚙ Settings · " + nameOf(dw)}</span>
+        <input className={inputCss} style={{ width: 96, fontSize: 9, padding: "1px 5px", flex: "none" }} placeholder="find a setting…" value={state.editQuery || ""}
+          data-pw-edfind="1" title="type a word — currency, zoom, news, dividends… — to see only the matching settings"
+          onChange={(ev) => dispatch({ type: "EDIT_QUERY", value: ev.target.value })} />
+        {q ? chip("×", false, () => dispatch({ type: "EDIT_QUERY", value: "" }), "show every setting again", "find:clear", { ctl: "findclear" }) : null}
         {chip(hints ? "hide hints" : "show hints", false, () => dispatch({ type: "EDIT_HINTS", on: !hints }),
           "the one-line explanations under each section", "hints", { hints: hints ? "1" : "0" })}
         <span className={edChip} style={{ fontSize: 10 }} title="close (Esc)" data-pw-edclose="1"
           onClick={() => dispatch({ type: "CLOSE_EDITOR" })}>×</span>
       </div>
+      {q && !anyMatch ? <div className={edHint} data-pw-edfind-none="1">{"nothing matches “" + q + "” — try currency, zoom, graph, news, alerts, dividends"}</div> : null}
       {group("portfolio", pfHead, portfolioBody, "the whole portfolio's settings — shared by every window")}
       {group("window", winHead, winBody, "this window's name, place and size")}
-      <div className={edCaption}>
+      {!anyFeature ? null : <div className={edCaption}>
         <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
           title="tick what this window shows">What it shows</span>
         {chip(adv ? "arrange ▾" : "arrange ▸", adv, () => dispatch({ type: "EDIT_ADVANCED", on: !adv }),
           "order, columns, what hides first, move to another window", "adv", { adv: adv ? "1" : "0" })}
-      </div>
-      {hints ? <div className={edHint}>{adv ? EDIT_HINTS.arrange : EDIT_HINTS.arrangeOff}</div> : null}
+      </div>}
+      {hints && anyFeature && !q ? <div className={edHint}>{adv ? EDIT_HINTS.arrange : EDIT_HINTS.arrangeOff}</div> : null}
       {EDIT_FEATURE_GROUPS.map((g) => group(g[0], groupLabel(g), featureBody(g[0]), EDIT_HEAD_TIPS[g[0]]))}
     </div>
   );
@@ -5664,7 +5979,8 @@ const renderWin = (state, dispatch) => {
             // index starts later than the graph
             lead: (j0 > 0 ? "since " + fmtDayY(P[j0].t) + ": " : "") + "you " + f1(a) + " · " + sym + " " + f1(b) + " · ",
             verdict: diff > 0 ? "beat by " + diff.toFixed(1) + " pts" : diff < 0 ? "behind by " + Math.abs(diff).toFixed(1) + " pts" : "even with " + sym,
-            short: diff === 0 ? "even" : null,          // a narrow window: the symbol is already in the lead
+            // a narrow window (< 400 px): the symbol is already in the lead, so just the gap
+            short: diff === 0 ? "even" : (diff > 0 ? "+" : "−") + Math.abs(diff).toFixed(1) + " pts",
             diff: diff,
           };
         }
@@ -5814,7 +6130,7 @@ const renderWin = (state, dispatch) => {
   const rk = d.risk || {};
   const riskH = K.RISK_FIX + (perfBlk && perfBlk.ok === true && rk.real ? 2 * K.RISK_ROW : perfWhy(perfBlk) ? K.RISK_ROW : 0) +
     (rk.backtest ? K.RISK_ROW : 0) + (rk.unscored && rk.unscored.length ? K.RISK_ROW : 0);
-  const addH = state.showAdd || empty ? K.ADD_FORM : 0;
+  const addH = state.showAdd || empty ? K.ADD_FORM + importH(state) : 0;
   const holdList = !focus && !empty && state.view === "list";
   const est = {
     "panel.today": () => EYE + 5 + moversN * K.MOVER_ROW + K.TODAY_FIX,
@@ -5866,6 +6182,11 @@ const renderWin = (state, dispatch) => {
   if (from) tabWs.push(tabW("from " + fmtDayY(from.t) + " 00:00 ×") + 4);
   else if (state.mark) tabWs.push(tabW("start here") + 4);
   const sectorFacets = sectorMode && sectorData && sectorData.t && sectorData.t.length >= 2 ? 1 + (sectorData.themes || []).length : 0;
+  // the welcome card (13.4): while the holdings are still the demo portfolio's,
+  // in the first window only, until "hide" (set_setting welcome false)
+  // (only where its buttons work: the + form lives in the holdings panel)
+  const welcomeOn = d.demo === true && uiPrefs(state).welcome !== false && !(G.win && G.win.idx) && !compactOf(state) &&
+    enabled(win, "panel.holdings");
   const L = layoutFor(win, {
     Wu: G.Wu, Hu: G.Hu, on: on, order: itemsOf(win), est: est, head: headLines, tabs: tabWs,
     lists: { holdings: holdList ? listRows.length : null, earnings: calendar.length || null,
@@ -5874,7 +6195,7 @@ const renderWin = (state, dispatch) => {
     focusList: focusName && focusName !== "portfolio" ? 5 + 2 * K.RISK_ROW : 0,
     readoutOwnLine: readoutOwnLine, notesForced: !!state.dayMsg || sectorMode, benchLine: benchAny, lateLine: lateAny,
     simCap: simShown, benchPick: benchCtl && !!state.benchPick, loading: env.status === "loading",
-    warn: !!((d.missingTickers || []).length || env.lastFetchFailed),
+    warn: !!((d.missingTickers || []).length || env.lastFetchFailed), welcome: welcomeOn,
     mapWide: state.view === "map", expanded: !!state.mapExpanded, tOn: tOn, undated: anyUndated,
     cellsOn: { spark: on["row.spark"], vol: on["row.vol"], drift: on["row.drift"], day: !!on["row.day"],
       value: on["row.value"], pl: on["row.pl"], price: on["row.price"] },
@@ -6038,9 +6359,52 @@ const renderWin = (state, dispatch) => {
   const fStats = footOn && inItems("footer.stats"), fUpd = footOn && inItems("footer.updated"), fExp = footOn && inItems("footer.export");
   const upText = fUpd && env.status !== "loading" ? "updated " + fmtAge(env.cacheAgeSeconds) + " ago" : "";
   // (only "updated" switched on while loading: nothing to say yet, no empty line)
+  const welcomeBlock = !welcomeOn ? null : (
+    <div className={welcomeCss} data-pw-panel="welcome" data-pw-est={LAYOUT_K.WELCOME}>
+      <div className={rowFlex} style={{ alignItems: "baseline" }}>
+        <span className={eyebrow} style={{ color: C.ink }}>welcome — this is a demo portfolio</span>
+        <span className={linkBtn} style={{ fontSize: 8.5 }} data-pw-welcome="hide"
+          title="hide this card for good (it comes back only with welcome: true in positions.json)"
+          onClick={() => saveSetting("welcome", "false", dispatch)}>hide</span>
+      </div>
+      <div className={welcomeLine}><span style={edDim}>1.</span><span>your stocks:</span>
+        <span className={tabBtn} title="add one stock at a time (any stock Yahoo Finance lists)" data-pw-welcome="add"
+          onClick={() => { if (!state.showAdd) dispatch({ type: "TOGGLE_ADD" }); }}>+ add one</span>
+        <span className={tabBtn} title="paste a list, or pick a CSV file exported from your broker" data-pw-welcome="import"
+          onClick={() => openImport(state, dispatch)}>import a list…</span>
+        <span className={tabBtn} title="remove the demo holdings first (a backup of the file is kept)" data-pw-welcome="fresh"
+          onClick={() => { if (!state.showAdd) dispatch({ type: "TOGGLE_ADD" });
+            dispatch({ type: "SET_PENDING", pending: { cmd: helper(["sell", "--reset-all"]), label: "remove the demo holdings? (a backup is kept)" } }); }}>start fresh</span>
+      </div>
+      <div className={welcomeLine}><span style={edDim}>2.</span><span>your currency, index and look:</span>
+        <span className={tabBtn} data-pw-welcome="portfolio" onClick={() => dispatch({ type: "OPEN_EDITOR", group: "portfolio" })}>⚙ portfolio settings</span>
+      </div>
+      <div className={welcomeLine}><span style={edDim}>3.</span><span>what this window shows:</span>
+        <span className={tabBtn} data-pw-welcome="panels" onClick={() => dispatch({ type: "OPEN_EDITOR", group: "panels" })}>⚙ what it shows</span>
+        <span style={edDim}>— or drag the edges to resize it</span>
+      </div>
+    </div>
+  );
+  // the update offer (13.4): GitHub's newest release when newer than this VERSION
+  // (not after "later" for that version); the result of the last update.sh run
+  const updInfo = d.update && typeof d.update === "object" ? d.update : null;
+  const upd = updInfo && updInfo.latest && newerVersion(updInfo.latest, VERSION) && state.updateLater !== updInfo.latest ? updInfo : null;
+  const updRes = env.updateResult && typeof env.updateResult === "object" ? env.updateResult : null;
+  const updMsg = state.updateMsg && state.tick - state.updateMsg.tick <= EXPORT_TICKS ? state.updateMsg
+    : updRes && updRes.ok === true && updRes.to === VERSION ? { text: "updated to " + updRes.to + " ✓", err: false }
+    : updRes && updRes.ok === false && updRes.message ? { text: "update failed: " + String(updRes.message).slice(0, 90), err: true } : null;
+  const askLine = upd && state.updateAsk ? (
+    <div className={css`${mono} font-size: 8.5px; color: ${C.amber}; margin-top: 4px; line-height: 1.5;`} data-pw-update-ask="1">
+      {"update to " + upd.latest + " now? Your holdings, settings and history stay; the widget reloads by itself. "}
+      <span className={linkBtn} style={{ color: C.ink }} onClick={() => runUpdate(upd, dispatch)}>yes, update</span>{" · "}
+      {upd.url ? <span className={linkBtn} onClick={() => run("open " + shq(upd.url))}>what's new</span> : null}{upd.url ? " · " : ""}
+      <span className={linkBtn} onClick={() => dispatch({ type: "UPDATE_LATER", version: upd.latest })}>later</span>
+    </div>
+  ) : null;
   const footerBlock = (
     <div>
-      {fStats || fExp || upText || missing.length || failed ? (
+      {askLine}
+      {fStats || fExp || upText || missing.length || failed || upd || updMsg ? (
       <div className={footGap ? css`${sectionGap} display:flex; justify-content:space-between;` : css`display:flex; justify-content:space-between;`}
         data-pw-panel="footer" data-pw-est={L.est.footer + (footGap ? GAP_IN : 0)}>
         <span className={css`${mono} font-size: 8px; color: ${C.dim};`}>
@@ -6061,6 +6425,14 @@ const renderWin = (state, dispatch) => {
           ) : null}
         </span>
         <span className={css`${mono} font-size: 8px; color: ${C.dim};`}>
+          {upd ? (
+            <span className={linkBtn} style={{ fontSize: 8, color: C.amber }} data-pw-update={upd.latest}
+              title={"version " + upd.latest + " is out (you have " + VERSION + ") — click to update; your holdings and history stay"}
+              onClick={() => dispatch({ type: "UPDATE_ASK", on: !state.updateAsk })}>{"update " + upd.latest + " ▸"}</span>
+          ) : null}
+          {upd && (updMsg || fExp || failed || upText) ? " · " : ""}
+          {updMsg ? <span style={{ color: updMsg.err ? C.down : C.up }} data-pw-update-msg={updMsg.err ? "err" : "ok"} title={updMsg.text}>{updMsg.text}</span> : null}
+          {updMsg && (fExp || failed || upText) ? " · " : ""}
           {fExp ? (
           <span className={linkBtn} style={{ fontSize: 8 }} onClick={() => exportCsv(state, dispatch)}
             title="save holdings, daily values and sales as CSV files in ~/Documents/Portfolio and show them in Finder">export</span>
@@ -6122,6 +6494,7 @@ const renderWin = (state, dispatch) => {
       <div data-pw-t={Math.round(L.T)} data-pw-scroll={L.scroll ? "1" : "0"}>
         {editor}
         {headerBlock}
+        {welcomeBlock}
         <div className={headOn ? sectionGap : ""}>
           <div className={rowFlex}>
             <span className={eyebrow}>holdings · map</span>
@@ -6655,6 +7028,7 @@ const renderWin = (state, dispatch) => {
     <div data-pw-t={Math.round(L.T)} data-pw-scroll={L.scroll ? "1" : "0"}>
       {editor}
       {headerBlock}
+      {welcomeBlock}
 
       {/* ---------------- graph (full width; folded: a mini graph) ---------------- */}
       {graphOn ? (
@@ -6968,9 +7342,22 @@ const renderWindow = (state, win, i, n, disp, dispatch) => {
   return renderWin(ws, wd);
 };
 
+let mediaHook = null;   // {dispatch}: one prefers-color-scheme listener for the widget
+const armMediaHook = (dispatch) => {
+  if (mediaHook) { mediaHook.dispatch = dispatch; return; }
+  mediaHook = { dispatch: dispatch };
+  try {
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const fn = () => { if (mediaHook) mediaHook.dispatch({ type: "THEME_MEDIA" }); };
+    if (mq.addEventListener) mq.addEventListener("change", fn); else if (mq.addListener) mq.addListener(fn);
+  } catch (e) { /* no matchMedia: the theme follows the saved setting only */ }
+};
+
 export const render = (stateIn, dispatch) => {
   const state0 = sane(stateIn);
   const state = state0.wins && typeof state0.wins === "object" ? state0 : merge(state0, { wins: {} });
+  THEME_NOW = themeOf(state);
+  armMediaHook(dispatch);
   const disp = displayOf(state);
   const all = windowsOf(state, disp);
   // until there is data (starting, setup, an error) only the first window shows

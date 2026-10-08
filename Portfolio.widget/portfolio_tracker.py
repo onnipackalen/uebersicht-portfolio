@@ -169,7 +169,23 @@ DEFAULT_SETTINGS = {
     "display": None,               # {"windows": [...]}: the widget's windows and
                                    # what each shows (display_prefs.py); None =
                                    # the one default window
+    # 13.4
+    "theme": "dark",               # dark | light | auto (the Mac's appearance)
+    "opacity": 0.88,               # the window background, 0.3 (glass) to 1 (solid)
+    "updates": True,               # look for a newer release on GitHub once a day
+    "welcome": True,               # the welcome card while the demo portfolio is shown
 }
+THEMES = ("dark", "light", "auto")
+OPACITY_RANGE = (0.3, 1.0)
+
+# the update check (13.4): the newest release on GitHub, once a day, cached
+# in .cache/update.json; the widget compares it with its own VERSION. One
+# plain request for a public page, nothing about the portfolio in it.
+# PORTFOLIO_UPDATE_URL (tests) may name any URL, a file:// one included.
+UPDATE_URL = "https://api.github.com/repos/onnipackalen/uebersicht-portfolio/releases/latest"
+UPDATE_TTL = 86400              # s between checks that worked
+UPDATE_RETRY = 6 * 3600         # s after one that failed
+UPDATE_TIMEOUT = 8              # s for the request
 
 # price alerts ("_alerts" in positions.json, alerts.py): one kind per rule
 PRICE_ALERT_KINDS = ("above", "below", "pctFromCost", "drawdownPct")
@@ -460,7 +476,115 @@ def ui_settings(path, settings):
             "backtestYears": backtest_years(now.get("backtestYears")),
             "alerts": now.get("alerts") is True,
             "alertThreshold": ui_number(now.get("alertThreshold"), 5),
-            "portfolioAlertThreshold": ui_number(now.get("portfolioAlertThreshold"), 2.5)}
+            "portfolioAlertThreshold": ui_number(now.get("portfolioAlertThreshold"), 2.5),
+            # appearance, the update check and the welcome card (13.4)
+            "theme": ui_theme(now.get("theme")),
+            "opacity": ui_opacity(now.get("opacity")),
+            "updates": now.get("updates") is not False,
+            "welcome": now.get("welcome") is not False}
+
+
+def ui_theme(value):
+    """_settings.theme as saved when it is one of THEMES, else "dark"."""
+    return value if isinstance(value, str) and value in THEMES else "dark"
+
+
+def ui_opacity(value):
+    """_settings.opacity clamped to OPACITY_RANGE (2 decimals), else 0.88."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0.88
+    v = round(min(OPACITY_RANGE[1], max(OPACITY_RANGE[0], float(value))), 2)
+    return int(v) if v == int(v) else v
+
+
+def is_demo(raw, example_path):
+    """True while the holdings are exactly the demo portfolio's (the welcome
+    card shows then): the same tickers as positions.example.json, nothing
+    sold, no money-in figure."""
+    if not isinstance(raw, dict):
+        return False
+    held = {k.upper() for k in raw if isinstance(k, str) and not k.startswith("_")}
+    if not held or raw.get("_realized") or raw.get("_invested") is not None:
+        return False
+    example = read_json(example_path, None)
+    if not isinstance(example, dict):
+        return False
+    return held == {k.upper() for k in example if isinstance(k, str) and not k.startswith("_")}
+
+
+def parse_version(text):
+    """"v13.4" / "13.4.1" -> "13.4" / "13.4.1"; None for anything else."""
+    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)\s*$", str(text or ""))
+    return m.group(1) if m else None
+
+
+def parse_release(obj):
+    """A GitHub "latest release" object -> {latest, url, zip, published} or
+    None when it has no usable tag."""
+    if not isinstance(obj, dict):
+        return None
+    latest = parse_version(obj.get("tag_name") or obj.get("name"))
+    if not latest:
+        return None
+    zip_url = None
+    for a in obj.get("assets") or []:
+        if isinstance(a, dict) and str(a.get("name") or "").endswith(".zip") \
+                and str(a.get("browser_download_url") or "").startswith(("https://", "file://")):
+            zip_url = a["browser_download_url"]
+            break
+    url = obj.get("html_url") if str(obj.get("html_url") or "").startswith("https://") else None
+    pub = obj.get("published_at") if isinstance(obj.get("published_at"), str) else None
+    return {"latest": latest, "url": url, "zip": zip_url, "published": pub}
+
+
+def fetch_release():
+    """The newest release's JSON from UPDATE_URL (PORTFOLIO_UPDATE_URL in
+    tests). Raises on network trouble or bad JSON."""
+    import urllib.request
+    url = os.environ.get("PORTFOLIO_UPDATE_URL") or UPDATE_URL
+    req = urllib.request.Request(url, headers={"User-Agent": NEWS_FEED_UA,
+                                               "Accept": "application/vnd.github+json, application/json"})
+    kw = {"context": feed_ssl_context()} if url.startswith("https://") else {}
+    with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT, **kw) as r:
+        return json.loads(r.read(200000).decode("utf-8", "replace"))
+
+
+def check_update(cache_dir, enabled=True, now=None, force=False):
+    """The cached answer of the update check, refreshed when due (UPDATE_TTL
+    after a check that worked, UPDATE_RETRY after one that failed, or
+    `force`). Off (`enabled` False): None, and no request. Never raises;
+    the cache keeps the last known release when a check fails.
+    -> {latest, url, zip, checked, ok} or None (nothing known yet)."""
+    if not enabled and not force:
+        return None
+    now = int(now if now is not None else time.time())
+    path = os.path.join(cache_dir, "update.json")
+    state = read_json(path, None)
+    if not isinstance(state, dict):
+        state = {}
+    checked = state.get("checked") if isinstance(state.get("checked"), (int, float)) else 0
+    due = force or not state or now - checked >= (UPDATE_TTL if state.get("ok") else UPDATE_RETRY)
+    if due:
+        try:
+            rel = parse_release(fetch_release())
+            if rel is None:
+                raise ValueError("no release tag in the answer")
+            state = {"checked": now, "ok": True, "latest": rel["latest"], "url": rel["url"],
+                     "zip": rel["zip"], "published": rel["published"]}
+        except Exception as e:
+            state = {"checked": now, "ok": False, "error": str(e)[:200],
+                     "latest": state.get("latest"), "url": state.get("url"), "zip": state.get("zip"),
+                     "published": state.get("published")}
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            write_json(path, state)
+        except Exception:
+            pass
+    if not parse_version(state.get("latest")):
+        return {"latest": None, "url": None, "zip": None, "checked": state.get("checked"),
+                "ok": state.get("ok") is True} if state else None
+    return {"latest": state["latest"], "url": state.get("url"), "zip": state.get("zip"),
+            "checked": state.get("checked"), "ok": state.get("ok") is True}
 
 
 def ui_currency(value):
@@ -3704,6 +3828,8 @@ def main(argv=None, yf_module=None):
                          "positions file (keeps the newest %d); JSON only" % BACKUP_KEEP)
     ap.add_argument("--now", default=None, metavar="ISO-DATETIME",
                     help="with --daily-backup: pretend it is this time (tests)")
+    ap.add_argument("--check-update", action="store_true",
+                    help="ask GitHub for the newest release now and print it as JSON")
     args = ap.parse_args(argv)
     if args.currency is not None and args.currency.strip().lower() != "auto" \
             and not currency_code(args.currency):
@@ -3730,6 +3856,11 @@ def main(argv=None, yf_module=None):
         json.dump(json_safe(days_before(cache_dir, args.days_before,
                                         args.days_count or DAILY_SEND)),
                   sys.stdout, allow_nan=False)
+        return 0
+    if args.check_update:
+        # "check now" in the editor: standard library only, JSON only, exit 0
+        os.makedirs(cache_dir, exist_ok=True)
+        print(json.dumps(check_update(cache_dir, True, force=True) or {"latest": None, "ok": False}))
         return 0
 
     if yf_module is None:
@@ -3786,6 +3917,12 @@ def main(argv=None, yf_module=None):
     tickers = sorted(positions.keys())
     had_tickers = bool(tickers)
     fx = FX(display)
+    # the update check runs beside the price requests (once a day, 8 s at most)
+    update_box = [None]
+    update_thread = threading.Thread(
+        target=lambda: update_box.__setitem__(0, check_update(cache_dir, settings.get("updates") is not False)),
+        daemon=True)
+    update_thread.start()
 
     def quote_currency(tk, r=None):
         """positions file > Yahoo (this run, else cached) > suffix guess"""
@@ -4802,9 +4939,17 @@ def main(argv=None, yf_module=None):
         except OSError:
             pass
 
+    update_thread.join(UPDATE_TIMEOUT + 2)
     out = {
         "name": str(settings["title"] or "portfolio"),
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # 13.4: the holdings are still the demo portfolio's (the welcome card
+        # shows while they are), and the newest release on GitHub ({latest,
+        # url, zip, checked, ok}; null until the first check, or with the
+        # check switched off)
+        "demo": is_demo(raw_positions, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                    "positions.example.json")),
+        "update": update_box[0] if update_thread.is_alive() is False else None,
         "epoch": now_epoch(),
         "currency": display,
         "marketOpen": session == "open",

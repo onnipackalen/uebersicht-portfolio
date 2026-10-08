@@ -32,6 +32,12 @@ alerts on big moves. Prices come from Yahoo Finance.
 - **Your layout**: drag it anywhere, resize it, zoom it, or split it into
   several windows — each showing just the parts you pick (graph, holdings,
   headlines, alerts…). The content adapts to the size you give it.
+- **Your look**: dark, light, or whatever your Mac is set to; solid or
+  see-through. A search box finds any setting; one click resets them.
+- **Easy start**: a welcome card walks you through the first steps, and a
+  whole portfolio can be imported at once from a pasted list or a CSV file.
+  When a new version is out, the widget says so — one click updates it and
+  keeps your holdings.
 - **Returns that mean something**: real annual return (XIRR), time-weighted
   return, realized gains, dividends, drawdown, beta, an index to beat, target
   mix with rebalancing trades, price alerts, CSV export and a menu-bar summary.
@@ -59,8 +65,11 @@ alerts on big moves. Prices come from Yahoo Finance.
 **First run.** The widget starts with a demo portfolio of 22 stocks. Prices
 show up within a minute; the years of history behind the 3Y/5Y tabs then
 download in the background ("loading history 12/40…" under the graph — once;
-later refreshes only add new days). Replace the demo with your holdings
-(below), or click **+ → start fresh** to clear it.
+later refreshes only add new days). A **welcome card** at the top walks you
+through the first steps — add your stocks one by one or import a list, pick
+your currency and look, choose what the window shows — and goes away by
+itself once the holdings are yours (**hide** closes it earlier). Replace the
+demo with your holdings (below), or click **+ → start fresh** to clear it.
 
 Needs macOS with Übersicht and Python 3.9 or newer (the one that comes with
 the Xcode command line tools is fine); `install.sh` adds the one package the
@@ -74,6 +83,21 @@ widget uses, yfinance.
 and asks you to confirm with its real name and price. Leave the price empty to
 use today's price; add a date for older purchases. **sell** works the same way
 (`all` sells the whole position).
+
+**Many at once — import a list.** Click **+ → import a list…**, paste one
+holding per line — `KO 10`, `MSFT 5 at 310 on 2024-03-01`, `SHOP.TO 12 @
+61.5` — or your broker's CSV export (or **choose a file…** to pick it), press
+**preview**, look over the rows, then **add N holdings**. Columns named
+symbol / ticker, quantity / shares, average cost / price (or a book value,
+divided by the shares) and purchase / trade date are recognised; numbers may
+carry currency signs and thousands separators, dates may be `2024-03-01`,
+`01.03.2024` or `03/01/2024`. A line that is not a holding (a total row, a
+sale, a name without a ticker) is skipped with a note; nothing stops the rest.
+Each holding becomes a lot — a ticker you already hold gets another lot — and
+a copy of the old `positions.json` is kept next to it
+(`positions.backup-…-import.json`). From Terminal:
+`python3 import_positions.py --file ~/Downloads/holdings.csv` shows the
+preview, `--commit` writes it.
 
 **Selling records the gain.** Each sale is written to a `_realized` list in
 `positions.json` — date, shares, proceeds, cost (oldest shares first) and
@@ -273,13 +297,20 @@ when there isn't room ("+N hidden — ⚙" says what). Double-click an edge to g
 back to the default width or to "fit content".
 
 **⚙** in the title row opens the settings for that window — three groups,
-each with a one-line hint (the **?** chip hides the hints):
+each with a one-line hint (the **hide hints** chip hides the hints). The
+**find a setting…** box at the top shows only the settings whose name or
+explanation contains what you type ("zoom", "news", "dividends"…), across
+all three groups.
 
 - **Portfolio** — settings the whole portfolio shares, no JSON needed: its
   name, currency, how many years of history (3 · 5 · 10 · everything), the
   index to compare with, headlines on/off, big-move alerts on/off with both
-  thresholds, and whole-share or fractional rebalancing. A currency or
-  history change says "updates at the next refresh" until it has.
+  thresholds, whole-share or fractional rebalancing, the **look** (dark ·
+  light · follow my Mac), how solid the **background** is (solid · normal ·
+  lighter · glass), and **updates** (check once a day · never · check now).
+  **reset portfolio settings** puts every one of them back to its default —
+  your holdings, the name, targets and windows stay. A currency or history
+  change says "updates at the next refresh" until it has.
 - **This window** — its name, one line, size (narrow · normal · wide, or
   exact width and height; empty height = fit content), zoom, **+ new window**
   from a template (full, graph only, holdings, news & alerts, news page,
@@ -420,6 +451,10 @@ out for its default. All of them except `targets` can be set in the widget
 | `rebalanceWhole` | automatic | rebalance in whole shares (`true`) or fractional (`false`) |
 | `display` | none | your windows and what each shows (the **⚙** editor), incl. a window's news page options (`news`) |
 | `position`, `scale` | none | the single window's spot and zoom from before windows existed |
+| `theme` | `"dark"` | the look: `"dark"`, `"light"` or `"auto"` (follows the Mac's appearance) |
+| `opacity` | `0.88` | how solid the window's background is, `0.3` (glass) to `1` (solid) |
+| `updates` | `true` | look for a newer version on GitHub once a day (**update … ▸** in the bottom row) |
+| `welcome` | `true` | the welcome card while the holdings are still the demo portfolio's |
 
 For example:
 
@@ -480,6 +515,15 @@ In detail:
   come from Script Editor, so allow it under System Settings → Notifications.
 - `news`: `true` shows the latest headlines in a stock's detail view and marks
   holdings moving more than 3% (default `false`: no headline requests at all).
+- `theme` / `opacity`: the look. `"auto"` follows System Settings →
+  Appearance and switches when the Mac does. The opacity is the card's
+  background only — text and graphs stay solid.
+- `updates`: once a day the widget asks GitHub for its newest release and,
+  when that is newer, offers it in the bottom row (see *Updating*). `false`
+  = no requests to GitHub; ⚙ → Portfolio → updates → **check now** still
+  works when you ask.
+- `welcome`: the card with the first steps, shown while the holdings are
+  exactly the demo's; **hide** sets it to `false`.
 
 **Price alerts** live next to `_settings` in a `_alerts` list — separate from
 the daily-move `alerts` above, and on whenever the list has entries:
@@ -540,15 +584,27 @@ stock *has* moved, not a forecast.
 - With **market news** on, CNBC, MarketWatch, Yahoo Finance and/or FT get a
   plain request for their public headline feed every 15 minutes — no
   symbols, no account, nothing about your portfolio.
+- With `updates` on (the default) the widget asks GitHub once a day for the
+  newest release: one plain request to `api.github.com`, nothing about your
+  portfolio in it. `updates: false` (⚙ → Portfolio → updates → **never**)
+  stops it. Updating downloads the release zip from GitHub.
 - Sharing a screenshot shows your numbers; the demo portfolio is there for
   that.
 
 ## Updating
 
-Replace the code files and keep your `positions.json`, its
-`positions.backup-*.json` copies and the `.cache/` folder (the value
-history). Or copy those into the new folder before switching. Settings and
-files from older versions keep working.
+When a newer version is out, the bottom row says **update 13.5 ▸**; click it
+and then **yes, update**. The widget downloads the release, keeps your
+`positions.json`, its backups, `python.txt` and the `.cache/` folder (the
+value history), copies the old code to `~/.portfolio-widget/backups/` (the
+newest three are kept), swaps the files and reloads by itself — "updated to
+13.5 ✓" then shows for a while. **what's new** opens the release notes,
+**later** hides the offer until the next version.
+
+By hand: `bash update.sh` in the widget folder does the same (it needs
+`curl` and `unzip`, both part of macOS), or replace the code files yourself
+and keep the data files named above. Settings and files from older versions
+keep working.
 
 ## Troubleshooting
 
@@ -572,6 +628,12 @@ files from older versions keep working.
   interaction*.
 - The market-hours dot follows US hours (NYSE/Nasdaq).
 
+- **"update failed: …"** in the bottom row: the download or the swap did not
+  work; nothing of yours changed. Run `bash update.sh` in the widget folder
+  (Terminal) for the full message, or install the release by hand (see
+  *Updating*). A rollback copy of the previous code sits in
+  `~/.portfolio-widget/backups/`.
+
 ## Files
 
 | file | what it does |
@@ -587,6 +649,8 @@ files from older versions keep working.
 | `alerts.py` | add, remove and list price alerts (`_alerts`) |
 | `display_prefs.py` | checks the `display` setting (windows, features, sizes) |
 | `set_setting.py` | saves what you click in the widget (index, ⤢, one line, news, windows…) into `_settings` |
+| `import_positions.py` | adds many holdings at once from a pasted list or a CSV file (**+ → import a list…**) |
+| `update.sh` | installs the newest release from GitHub, keeping your data (**update … ▸** in the bottom row) |
 | `positions.example.json` | the demo portfolio; copied to `positions.json` on first run |
 | `install.sh`, `requirements.txt` | one-time Python setup |
 

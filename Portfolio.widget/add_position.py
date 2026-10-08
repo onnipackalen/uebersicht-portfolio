@@ -26,6 +26,43 @@ from datetime import datetime
 import portfolio_file as pf
 
 
+def add_lot(raw, ticker, lot, theme=None):
+    """Append one purchase (`lot` = {"shares", "date"[, "avgCost"]}) to the
+    ticker's entry in the loaded positions file, converting the older entry
+    shapes (a bare share count, or {"shares", "avgCost", "purchaseDate"}) to
+    the lots shape first; nothing is overwritten. Returns "added" for a new
+    ticker, "added a lot to" otherwise. import_positions.py uses this too.
+    Raises ValueError for an entry shape it does not know."""
+    entry = raw.get(ticker)
+    if entry is None:
+        raw[ticker] = {"lots": [lot]}
+        if theme:
+            raw[ticker]["theme"] = theme
+        return "added"
+    if isinstance(entry, (int, float)) and not isinstance(entry, bool):
+        raw[ticker] = {"lots": [{"shares": float(entry)}, lot]}
+        return "added a lot to"
+    if isinstance(entry, dict) and "lots" in entry:
+        entry["lots"].append(lot)
+        if theme:
+            entry["theme"] = theme
+        return "added a lot to"
+    if isinstance(entry, dict) and "shares" in entry:
+        old_lot = {"shares": float(entry["shares"])}
+        if entry.get("purchaseDate"):
+            old_lot["date"] = entry["purchaseDate"]
+        if entry.get("avgCost") is not None:
+            old_lot["avgCost"] = float(entry["avgCost"])
+        new_entry = {k: v for k, v in entry.items()
+                     if k in ("theme", "currency")}
+        new_entry["lots"] = [old_lot, lot]
+        if theme:
+            new_entry["theme"] = theme
+        raw[ticker] = new_entry
+        return "added a lot to"
+    raise ValueError("unrecognized entry shape for %s" % ticker)
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
@@ -92,36 +129,10 @@ def main():
     lot = {"shares": shares, "date": date_str}
     if cost is not None:
         lot["avgCost"] = cost
-
-    entry = raw.get(ticker)
-    if entry is None:
-        raw[ticker] = {"lots": [lot]}
-        if args.theme:
-            raw[ticker]["theme"] = args.theme
-        action = "added"
-    elif isinstance(entry, (int, float)):
-        raw[ticker] = {"lots": [{"shares": float(entry)}, lot]}
-        action = "added a lot to"
-    elif isinstance(entry, dict) and "lots" in entry:
-        entry["lots"].append(lot)
-        if args.theme:
-            entry["theme"] = args.theme
-        action = "added a lot to"
-    elif isinstance(entry, dict) and "shares" in entry:
-        old_lot = {"shares": float(entry["shares"])}
-        if entry.get("purchaseDate"):
-            old_lot["date"] = entry["purchaseDate"]
-        if entry.get("avgCost") is not None:
-            old_lot["avgCost"] = float(entry["avgCost"])
-        new_entry = {k: v for k, v in entry.items()
-                     if k in ("theme", "currency")}
-        new_entry["lots"] = [old_lot, lot]
-        if args.theme:
-            new_entry["theme"] = args.theme
-        raw[ticker] = new_entry
-        action = "added a lot to"
-    else:
-        pf.fail("unrecognized entry shape for %s" % ticker)
+    try:
+        action = add_lot(raw, ticker, lot, args.theme)
+    except ValueError as e:
+        pf.fail(str(e))
 
     # the buy's cost goes into _invested (money put in)
     note = ""
