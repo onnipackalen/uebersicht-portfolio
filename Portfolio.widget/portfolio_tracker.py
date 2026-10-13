@@ -41,8 +41,10 @@ What it computes:
 
 Settings live in positions.json under "_settings" (see the README).
 
-Resilience: daily/hourly bars are cached for BARS_TTL, so a normal refresh is
-one request per ticker. A ticker that fails falls back to its last price
+Resilience: daily/hourly bars are cached for BARS_TTL while the ticker's
+market is open (or in US pre/after hours) and, once it has closed, until
+it opens again (BARS_MAX_AGE at most), so a normal refresh is one request
+per ticker. A ticker that fails falls back to its last price
 (marked stale); one that never had a price (typo, delisted) is skipped and
 reported in "missingTickers" rather than failing the whole run.
 
@@ -70,6 +72,7 @@ import bisect
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -100,7 +103,17 @@ DIVS_TTL = 86400                # re-check a holding's past dividends daily,
 DIVS_EMPTY_TTL = 7 * 86400      # weekly when it has paid none
 DIVS_PERIODS = ("2y", "5y", "10y", "max")   # dividend history reach, shortest first
 META_RETRY = 3600               # after a failed meta lookup, retry in ~1h
-BARS_TTL = 3600                 # re-download daily/hourly bars hourly
+BARS_TTL = 3600                 # re-download daily/hourly bars hourly while
+                                # their market is open (pre/after hours too);
+BARS_MAX_AGE = 3 * 86400        # ... once it has closed, the bars fetched after
+                                # the close are kept until it opens again, this
+                                # long at most (13.5: none at night / weekends)
+# how long widget_command.sh waits between refreshes (13.5,
+# .cache/refresh_after, refresh_after_for): any held / watched market open,
+# only pre/after hours, all closed. Never past the next open.
+REFRESH_OPEN = 270
+REFRESH_EDGE = 900
+REFRESH_CLOSED = 1800
 SECTOR_POINTS = 120             # points per sector series (one shared time axis)
 SECTOR_BAR_SHARE = 0.25         # a bar counts for the sector graphs only when at
                                 # least this share of the holdings traded in it
@@ -207,6 +220,9 @@ NEWS_KEEP_MAX = 10              # headlines kept per ticker in news.json,
                                 # newest first (Yahoo gives about 10)
 NEWS_KEEP_MIN = 3               # data.json holds at least this many per ticker
 NEWS_MAX_PER_REFRESH = 12       # news requests per refresh (the rest wait)
+META_MAX_PER_REFRESH = 20       # due earnings / dividend re-checks per refresh
+                                # (oldest first, the rest wait; never-fetched
+                                # tickers are not counted: they run at once)
 NEWS_PARALLEL = 4               # news requests in flight at once
 NEWS_BREAK = 3                  # first N news jobs all failing -> skip the rest
 NEWS_PLAN_MAX = 100             # planned tickers beyond this are dropped
@@ -380,6 +396,127 @@ def infer_currency(ticker):
     return "USD"
 
 
+# exchange clocks (13.5): (time zone, local open, local close), Monday to
+# Friday; lunch breaks and holidays are ignored. No suffix (and ^indexes)
+# = the US clock of market_session. They slow the refresh down while every
+# market held is closed and keep the daily / hourly bars from being
+# downloaded again at night (symbol_session, refresh_after_for).
+EXCHANGE_HOURS = {
+    ".TO": ("America/Toronto", "09:30", "16:00"), ".V": ("America/Toronto", "09:30", "16:00"),
+    ".CN": ("America/Toronto", "09:30", "16:00"), ".NE": ("America/Toronto", "09:30", "16:00"),
+    ".L": ("Europe/London", "08:00", "16:30"),
+    ".AS": ("Europe/Paris", "09:00", "17:30"), ".PA": ("Europe/Paris", "09:00", "17:30"),
+    ".BR": ("Europe/Paris", "09:00", "17:30"),
+    ".DE": ("Europe/Berlin", "09:00", "17:30"), ".F": ("Europe/Berlin", "09:00", "17:30"),
+    ".MI": ("Europe/Rome", "09:00", "17:30"), ".MC": ("Europe/Madrid", "09:00", "17:30"),
+    ".LS": ("Europe/Lisbon", "08:00", "16:30"), ".HE": ("Europe/Helsinki", "10:00", "18:30"),
+    ".VI": ("Europe/Vienna", "09:00", "17:30"), ".IR": ("Europe/Dublin", "08:00", "16:30"),
+    ".SW": ("Europe/Zurich", "09:00", "17:30"), ".ST": ("Europe/Stockholm", "09:00", "17:30"),
+    ".OL": ("Europe/Oslo", "09:00", "16:20"), ".CO": ("Europe/Copenhagen", "09:00", "17:00"),
+    ".T": ("Asia/Tokyo", "09:00", "15:30"), ".HK": ("Asia/Hong_Kong", "09:30", "16:00"),
+    ".AX": ("Australia/Sydney", "10:00", "16:00"), ".NZ": ("Pacific/Auckland", "10:00", "16:45"),
+    ".SI": ("Asia/Singapore", "09:00", "17:00"), ".KS": ("Asia/Seoul", "09:00", "15:30"),
+    ".TW": ("Asia/Taipei", "09:00", "13:30"), ".NS": ("Asia/Kolkata", "09:15", "15:30"),
+    ".BO": ("Asia/Kolkata", "09:15", "15:30"), ".SA": ("America/Sao_Paulo", "10:00", "17:00"),
+    ".MX": ("America/Mexico_City", "08:30", "15:00"), ".JO": ("Africa/Johannesburg", "09:00", "17:00"),
+    ".TA": ("Asia/Jerusalem", "10:00", "17:25"),
+}
+# crypto ("BTC-USD": a currency after the dash) trades around the clock,
+# and so do exchange rates ("EURUSD=X") as far as the refresh is concerned
+CRYPTO_RE = re.compile(r"^[A-Z0-9]+-[A-Z]{3}$")
+
+
+def local_epoch(day, hm, tz):
+    """epoch of `day` (a date) at "HH:MM" on the clock of `tz`"""
+    h, m = hm.split(":")
+    return int(datetime(day.year, day.month, day.day, int(h), int(m), tzinfo=tz).timestamp())
+
+
+def symbol_session(symbol, now=None):
+    """(state, last_close_epoch, next_open_epoch) of a symbol's exchange at
+    `now` (epoch; None = now_epoch()). state: open | pre | after | closed —
+    pre/after only on the US clock (no suffix, ^indexes: 04:00-09:30 and
+    16:00-20:00 ET); other exchanges are open or closed (EXCHANGE_HOURS).
+    Crypto and exchange rates are always open. last_close: the latest
+    weekday close at or before now; next_open: the next start of a session
+    (US: of pre-market or the open) after now."""
+    now = int(now if now is not None else now_epoch())
+    sym = str(symbol or "").strip().upper()
+    if sym.endswith("=X") or CRYPTO_RE.match(sym):
+        return "open", now, now
+    hours = None
+    if not sym.startswith("^"):
+        for suffix, h in EXCHANGE_HOURS.items():
+            if sym.endswith(suffix):
+                hours = h
+                break
+    tz = None
+    if hours:
+        try:
+            tz = ZoneInfo(hours[0])
+        except Exception:
+            hours = None
+    if not hours:
+        tz = MARKET_TZ
+        local = datetime.fromtimestamp(now, tz)
+        state = market_session(local)
+        starts, close_hm = ("04:00", "09:30"), "16:00"
+    else:
+        local = datetime.fromtimestamp(now, tz)
+        minutes = local.hour * 60 + local.minute
+        o, c = [int(x[:2]) * 60 + int(x[3:]) for x in hours[1:]]
+        state = "open" if local.weekday() < 5 and o <= minutes < c else "closed"
+        starts, close_hm = (hours[1],), hours[2]
+    day, last_close = local.date(), None
+    for _ in range(10):
+        if day.weekday() < 5:
+            t = local_epoch(day, close_hm, tz)
+            if t <= now:
+                last_close = t
+                break
+        day -= timedelta(days=1)
+    day, next_open = local.date(), None
+    for _ in range(10):
+        if day.weekday() < 5:
+            for hm in starts:
+                t = local_epoch(day, hm, tz)
+                if t > now:
+                    next_open = t
+                    break
+            if next_open is not None:
+                break
+        day += timedelta(days=1)
+    return state, last_close, next_open
+
+
+def refresh_after_for(symbols, now=None):
+    """Seconds widget_command.sh waits before the next refresh, from the
+    held and watched symbols' markets: REFRESH_OPEN while any is open,
+    REFRESH_EDGE while any is in US pre/after hours and none is open,
+    REFRESH_CLOSED otherwise (or with no symbols) — but never past the
+    earliest next open (REFRESH_OPEN at least), so the first refresh of a
+    session is not late."""
+    now = int(now if now is not None else now_epoch())
+    states, opens = set(), []
+    for sym in dict.fromkeys(symbols or ()):
+        try:
+            state, _, nxt = symbol_session(sym, now)
+        except Exception:
+            continue
+        states.add(state)
+        if nxt is not None:
+            opens.append(nxt)
+    if "open" in states:
+        secs = REFRESH_OPEN
+    elif "pre" in states or "after" in states:
+        secs = REFRESH_EDGE
+    else:
+        secs = REFRESH_CLOSED
+    if opens:
+        secs = min(secs, max(REFRESH_OPEN, min(opens) - now))
+    return int(secs)
+
+
 def split_currency(cur):
     """Quote currency -> (ISO code, multiplier into that code)."""
     if cur in MINOR_UNITS:
@@ -456,6 +593,7 @@ def ui_settings(path, settings):
     settings this run started with."""
     raw = read_json(path, None)
     now = load_settings(raw) if isinstance(raw, dict) else settings
+    top = raw if isinstance(raw, dict) else {}
     return {"showBenchmark": now["showBenchmark"] is not False,
             "graphBig": now["graphBig"] is True,
             "position": ui_position(now.get("position")),
@@ -481,7 +619,45 @@ def ui_settings(path, settings):
             "theme": ui_theme(now.get("theme")),
             "opacity": ui_opacity(now.get("opacity")),
             "updates": now.get("updates") is not False,
-            "welcome": now.get("welcome") is not False}
+            "welcome": now.get("welcome") is not False,
+            # cash on hand and the money put in (13.5): stored next to
+            # _settings (_cash / _invested), shown in ⚙ → Portfolio
+            "cash": ui_cash(top.get("_cash")),
+            "invested": ui_invested(top.get("_invested"))}
+
+
+def ui_amount(value):
+    """A finite amount > 0 (a number or numeric text, not true/false)
+    rounded to 2 decimals (an int when whole), else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v <= 0:
+        return None
+    v = round(v, 2)
+    return int(v) if v == int(v) else v
+
+
+def ui_cash(value):
+    """_cash as data.json's "ui" shows it: {ISO code upper-cased: amount}
+    for 3-letter codes with an amount > 0; {} for anything else."""
+    out = {}
+    if not isinstance(value, dict):
+        return out
+    for cur, amount in value.items():
+        iso = str(cur).strip().upper()
+        n = ui_amount(amount)
+        if re.match(r"^[A-Z]{3}$", iso) and n is not None:
+            out[iso] = n
+    return out
+
+
+def ui_invested(value):
+    """_invested (the money put in) as an amount > 0, else None."""
+    return ui_amount(value)
 
 
 def ui_theme(value):
@@ -497,19 +673,39 @@ def ui_opacity(value):
     return int(v) if v == int(v) else v
 
 
-def is_demo(raw, example_path):
-    """True while the holdings are exactly the demo portfolio's (the welcome
-    card shows then): the same tickers as positions.example.json, nothing
-    sold, no money-in figure."""
+def demo_kind(raw, example_path):
+    """What the welcome card should say (13.5): "example" while the holdings
+    are exactly the demo portfolio's (the same tickers as
+    positions.example.json), "empty" while there are none at all, else None.
+    Anything sold or a money-in figure means it is the owner's own: None, and
+    so does a buy added to a demo stock (more lots than the example has)."""
     if not isinstance(raw, dict):
-        return False
+        return None
+    if raw.get("_realized") or raw.get("_invested") is not None:
+        return None
     held = {k.upper() for k in raw if isinstance(k, str) and not k.startswith("_")}
-    if not held or raw.get("_realized") or raw.get("_invested") is not None:
-        return False
+    if not held:
+        return "empty"
     example = read_json(example_path, None)
     if not isinstance(example, dict):
-        return False
-    return held == {k.upper() for k in example if isinstance(k, str) and not k.startswith("_")}
+        return None
+    ex = {k.upper(): v for k, v in example.items() if isinstance(k, str) and not k.startswith("_")}
+    if held != set(ex):
+        return None
+
+    def n_lots(entry):
+        lots = entry.get("lots") if isinstance(entry, dict) else None
+        return len(lots) if isinstance(lots, list) else 1
+    for k, v in raw.items():
+        if isinstance(k, str) and not k.startswith("_") and n_lots(v) > n_lots(ex.get(k.upper())):
+            return None
+    return "example"
+
+
+def is_demo(raw, example_path):
+    """True while the welcome card shows: the demo portfolio's holdings or
+    none at all (see demo_kind)."""
+    return demo_kind(raw, example_path) is not None
 
 
 def parse_version(text):
@@ -549,11 +745,50 @@ def fetch_release():
         return json.loads(r.read(200000).decode("utf-8", "replace"))
 
 
+def update_due(state, now, force=False):
+    """Is a GitHub check due for update.json's `state`: never checked,
+    UPDATE_TTL after a check that worked, UPDATE_RETRY after one that failed,
+    or `force`. A check still "trying" (started less than UPDATE_RETRY ago,
+    or cut off by the refresh's exit: it counts as a failed one) is not."""
+    if force:
+        return True
+    if not isinstance(state, dict) or not state:
+        return True
+    trying = state.get("trying")
+    if isinstance(trying, (int, float)) and not isinstance(trying, bool) \
+            and 0 <= now - trying < UPDATE_RETRY:
+        return False
+    checked = state.get("checked") if isinstance(state.get("checked"), (int, float)) else 0
+    return now - checked >= (UPDATE_TTL if state.get("ok") else UPDATE_RETRY)
+
+
+def update_answer(state):
+    """update.json's state -> {latest, url, zip, checked, ok}, or None when
+    nothing is known yet (no state, or only a first check still trying)."""
+    if not isinstance(state, dict):
+        return None
+    state = {k: v for k, v in state.items() if k != "trying"}
+    if not parse_version(state.get("latest")):
+        return {"latest": None, "url": None, "zip": None, "checked": state.get("checked"),
+                "ok": state.get("ok") is True} if state else None
+    return {"latest": state["latest"], "url": state.get("url"), "zip": state.get("zip"),
+            "checked": state.get("checked"), "ok": state.get("ok") is True}
+
+
+def read_update_cache(cache_dir, enabled=True):
+    """The last known answer from .cache/update.json without asking GitHub
+    (a refresh whose check is still running uses it); None when off."""
+    if not enabled:
+        return None
+    return update_answer(read_json(os.path.join(cache_dir, "update.json"), None))
+
+
 def check_update(cache_dir, enabled=True, now=None, force=False):
-    """The cached answer of the update check, refreshed when due (UPDATE_TTL
-    after a check that worked, UPDATE_RETRY after one that failed, or
-    `force`). Off (`enabled` False): None, and no request. Never raises;
-    the cache keeps the last known release when a check fails.
+    """The cached answer of the update check, refreshed when due
+    (update_due). Off (`enabled` False): None, and no request. Never raises;
+    the cache keeps the last known release when a check fails. A due check
+    first stamps "trying" into update.json, so one cut off by the refresh's
+    exit waits UPDATE_RETRY instead of starting again on every refresh.
     -> {latest, url, zip, checked, ok} or None (nothing known yet)."""
     if not enabled and not force:
         return None
@@ -562,9 +797,12 @@ def check_update(cache_dir, enabled=True, now=None, force=False):
     state = read_json(path, None)
     if not isinstance(state, dict):
         state = {}
-    checked = state.get("checked") if isinstance(state.get("checked"), (int, float)) else 0
-    due = force or not state or now - checked >= (UPDATE_TTL if state.get("ok") else UPDATE_RETRY)
-    if due:
+    if update_due(state, now, force):
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            write_json(path, dict(state, trying=now))
+        except Exception:
+            pass
         try:
             rel = parse_release(fetch_release())
             if rel is None:
@@ -577,14 +815,10 @@ def check_update(cache_dir, enabled=True, now=None, force=False):
                      "published": state.get("published")}
         try:
             os.makedirs(cache_dir, exist_ok=True)
-            write_json(path, state)
+            write_json(path, state)       # a finished check: no "trying"
         except Exception:
             pass
-    if not parse_version(state.get("latest")):
-        return {"latest": None, "url": None, "zip": None, "checked": state.get("checked"),
-                "ok": state.get("ok") is True} if state else None
-    return {"latest": state["latest"], "url": state.get("url"), "zip": state.get("zip"),
-            "checked": state.get("checked"), "ok": state.get("ok") is True}
+    return update_answer(state)
 
 
 def ui_currency(value):
@@ -1045,11 +1279,34 @@ class NoPriceData(ValueError):
     """Yahoo answered, with no bars (typo, delisted): retrying won't help."""
 
 
+def bars_fresh(ticker, cached_bars, intraday_days, now):
+    """May cached daily / hourly bars stand in for a download? Younger than
+    BARS_TTL; or (13.5) the ticker's market is closed and they were fetched
+    after its last close, are younger than BARS_MAX_AGE and their daily bars
+    reach the live bars' session day (Yahoo can publish that day's bar hours
+    late: until it has, the bars are still re-downloaded hourly). So: one
+    download after each close, none at night or at weekends."""
+    t = (cached_bars or {}).get("t") or 0
+    age = now - t
+    if age < BARS_TTL:
+        return True
+    if age >= BARS_MAX_AGE or not intraday_days:
+        return False
+    try:
+        state, last_close, _ = symbol_session(ticker, now)
+        last_day = str(cached_bars["daily"][-1][0])
+    except Exception:
+        return False
+    return (state == "closed" and last_close is not None and t >= last_close
+            and last_day >= intraday_days[-1])
+
+
 def fetch_one(ticker, yf_module, cached_bars=None, want_currency=False,
               daily_period="1y"):
     """Fetch intraday 5m closes (the live price) plus daily (`daily_period`
     back) and hourly 1mo closes. Daily/hourly come from cached_bars while
-    younger than BARS_TTL and reaching at least as far back as asked.
+    fresh (bars_fresh: BARS_TTL, or until the next open once the market has
+    closed) and reaching at least as far back as asked.
     "daily" ends on the live session (see below); "dailyRaw" is Yahoo's
     bars as published, for the bars cache.
     Raises when there is no price at all: yfinance returns EMPTY frames for
@@ -1070,8 +1327,8 @@ def fetch_one(ticker, yf_module, cached_bars=None, want_currency=False,
     if cached_period not in DAILY_PERIODS:
         cached_period = "1y"
     if (intraday and cached_bars and cached_bars.get("daily")
-            and now_epoch() - cached_bars.get("t", 0) < BARS_TTL
-            and reach(cached_period) >= reach(daily_period)):
+            and reach(cached_period) >= reach(daily_period)
+            and bars_fresh(ticker, cached_bars, intraday_days, now_epoch())):
         daily = [tuple(x) for x in cached_bars["daily"]]
         hourly = [tuple(x) for x in cached_bars.get("hourly", [])]
         bars_t = cached_bars["t"]
@@ -1196,6 +1453,47 @@ def divs_due(entry, want, now):
             or DIVS_PERIODS.index(have) < DIVS_PERIODS.index(want))
 
 
+def jittered(now, ttl):
+    """A successful fetch's stamp, moved by up to ±15 % of its TTL so the
+    re-checks of tickers fetched together come due on different refreshes."""
+    return now + int(random.uniform(-0.15, 0.15) * ttl)
+
+
+def implied_move_wanted(entry):
+    """Earnings within the next 30 days (today included): the options-implied
+    move is shown, so fetch_meta keeps it fresh."""
+    ed = entry.get("earnings")
+    if not ed:
+        return False
+    try:
+        days = (datetime.strptime(ed, "%Y-%m-%d").date()
+                - datetime.now(MARKET_TZ).date()).days
+    except (ValueError, TypeError):
+        return False
+    return 0 <= days <= 30
+
+
+def meta_never_fetched(entry):
+    """fetch_meta has not run for this ticker yet (or its cache predates
+    the fields): it runs at once, outside META_MAX_PER_REFRESH."""
+    return "sector" not in entry or "name" not in entry or "exDividend" not in entry
+
+
+def meta_due(entry, now):
+    """fetch_meta's three re-check tests (info: DIVIDEND_TTL; calendar:
+    EARNINGS_TTL; implied move: EARNINGS_TTL while earnings are within 30
+    days) -> the oldest stamp among the due ones, or None when fetch_meta
+    would ask Yahoo nothing."""
+    due = []
+    if now - entry.get("dividendFetchedAt", 0) > DIVIDEND_TTL:
+        due.append(entry.get("dividendFetchedAt", 0))
+    if now - entry.get("earningsFetchedAt", 0) > EARNINGS_TTL:
+        due.append(entry.get("earningsFetchedAt", 0))
+    if implied_move_wanted(entry) and now - entry.get("impliedMoveFetchedAt", 0) > EARNINGS_TTL:
+        due.append(entry.get("impliedMoveFetchedAt", 0))
+    return min(due) if due else None
+
+
 def ymd_or_none(value):
     """A calendar date / datetime (or a one-item list of one) as YYYY-MM-DD,
     else None (NaT, strings, numbers)."""
@@ -1225,7 +1523,8 @@ def update_divs(ticker, yf_module, meta, divs_period):
             raise ValueError("empty dividend answer")
         entry["divs"] = divs
         entry["divsPeriod"] = divs_period
-        entry["divsFetchedAt"] = now
+        entry["divsFetchedAt"] = jittered(now, DIVS_EMPTY_TTL if not divs and not entry.get("dividendRate")
+                                          else DIVS_TTL)
         entry.pop("divsRetryAt", None)
     except Exception:
         entry["divsRetryAt"] = now + META_RETRY
@@ -1244,7 +1543,7 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
     # a whole week after one hiccup. The same .info call gives the sector
     # (the theme of untagged tickers); older caches lack it, hence "not in".
     if now - entry.get("dividendFetchedAt", 0) > DIVIDEND_TTL \
-            or "sector" not in entry or "name" not in entry:
+            or "sector" not in entry or "name" not in entry:   # in step with meta_due
         try:
             info = yf_module.Ticker(ticker).info or {}
             rate = info.get("dividendRate")
@@ -1254,7 +1553,7 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
                                or QUOTE_TYPE_THEMES.get(info.get("quoteType")))
             entry["name"] = (info.get("longName") or info.get("shortName")
                              or "").strip() or None
-            entry["dividendFetchedAt"] = now
+            entry["dividendFetchedAt"] = jittered(now, DIVIDEND_TTL)
         except Exception:
             entry["dividendRate"] = entry.get("dividendRate") or 0.0
             entry.setdefault("sector", None)  # else "not in" retries every run
@@ -1270,7 +1569,7 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
             or "exDividend" not in entry:
         earnings = None
         ex_div = None
-        fetched_at = now
+        fetched_at = jittered(now, EARNINGS_TTL)
         try:
             cal = yf_module.Ticker(ticker).calendar
             dates = None
@@ -1305,20 +1604,11 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
         entry["exDividend"] = ex_div
         entry["earningsFetchedAt"] = fetched_at
 
-    ed = entry.get("earnings")
-    want_move = False
-    if ed:
-        try:
-            days = (datetime.strptime(ed, "%Y-%m-%d").date()
-                    - datetime.now(MARKET_TZ).date()).days
-            want_move = 0 <= days <= 30
-        except ValueError:
-            pass
-    if not want_move:
+    if not implied_move_wanted(entry):
         entry["impliedMove"] = None
     elif now - entry.get("impliedMoveFetchedAt", 0) > EARNINGS_TTL:
-        entry["impliedMove"] = compute_implied_move(ticker, yf_module, ed, spot)
-        entry["impliedMoveFetchedAt"] = now
+        entry["impliedMove"] = compute_implied_move(ticker, yf_module, entry["earnings"], spot)
+        entry["impliedMoveFetchedAt"] = jittered(now, EARNINGS_TTL)
     return entry
 
 
@@ -3917,7 +4207,11 @@ def main(argv=None, yf_module=None):
     tickers = sorted(positions.keys())
     had_tickers = bool(tickers)
     fx = FX(display)
-    # the update check runs beside the price requests (once a day, 8 s at most)
+    # the update check runs beside the price requests (once a day, 8 s at
+    # most); the refresh never waits for it (13.5): when it is still running
+    # at the end, data.json gets the last known answer (read_update_cache)
+    # and the daemon thread dies with the process ("trying" in update.json
+    # makes that count as a failed check)
     update_box = [None]
     update_thread = threading.Thread(
         target=lambda: update_box.__setitem__(0, check_update(cache_dir, settings.get("updates") is not False)),
@@ -4212,6 +4506,14 @@ def main(argv=None, yf_module=None):
     # same pool so a new day's dividend and calendar calls overlap).
     meta_today = datetime.now(MARKET_TZ).date()
 
+    def divs_want(tk):
+        """how far back a held / sold ticker's past dividends must reach (the
+        sold slices' dates too: their payments still count)"""
+        return dividend_period(
+            {"lots": (positions[tk]["lots"] if tk in positions else []) + [
+                {"date": ld} for ld, _, _ in sold.get(tk, ())]},
+            meta_today)
+
     def meta_job(job):
         kind, tk = job
         try:
@@ -4222,11 +4524,7 @@ def main(argv=None, yf_module=None):
                 news_fetch_job(tk)
                 return
             if kind == "divs":
-                # the sold slices' dates too: their payments still count
-                update_divs(tk, yf_module, meta, dividend_period(
-                    {"lots": (positions[tk]["lots"] if tk in positions else []) + [
-                        {"date": ld} for ld, _, _ in sold.get(tk, ())]},
-                    meta_today))
+                update_divs(tk, yf_module, meta, divs_want(tk))
             else:
                 fetch_meta(tk, yf_module, meta, cache_dir,
                            (results.get(tk) or watch_results[tk]).get("price"))
@@ -4330,7 +4628,33 @@ def main(argv=None, yf_module=None):
 
     # news jobs interleaved with the meta work (news, meta, meta, news, ...):
     # no burst of news requests at the start of a refresh
-    meta_jobs = [("meta", tk) for tk in tickers + watch] + [("divs", tk) for tk in tickers + sold_only]
+    # 13.5: at most META_MAX_PER_REFRESH due re-checks (earnings, dividends)
+    # per refresh, oldest first, so the daily re-check of 60 holdings spreads
+    # over a few refreshes instead of one burst. Never-fetched tickers (a cold
+    # start, a new holding) run at once; jobs with nothing due run too: they
+    # ask Yahoo nothing (and clear an implied move whose earnings passed).
+    meta_now = now_epoch()
+    first_jobs, due_jobs, idle_jobs = [], [], []
+    for job in [("meta", tk) for tk in tickers + watch] + [("divs", tk) for tk in tickers + sold_only]:
+        kind, tk = job
+        entry = meta.get(tk) or {}
+        if kind == "meta":
+            if meta_never_fetched(entry):
+                first_jobs.append(job)
+                continue
+            stamp = meta_due(entry, meta_now)
+        else:
+            if clean_divs(entry.get("divs")) is None:
+                first_jobs.append(job)
+                continue
+            stamp = (entry.get("divsFetchedAt", 0)
+                     if divs_due(entry, divs_want(tk), meta_now) else None)
+        if stamp is None:
+            idle_jobs.append(job)
+        else:
+            due_jobs.append((stamp, job))
+    due_jobs.sort(key=lambda x: x[0])
+    meta_jobs = first_jobs + [j for _, j in due_jobs[:META_MAX_PER_REFRESH]] + idle_jobs
     jobs, mi = [], 0
     for tk in news_jobs:
         jobs.append(("news", tk))
@@ -4939,7 +5263,24 @@ def main(argv=None, yf_module=None):
         except OSError:
             pass
 
-    update_thread.join(UPDATE_TIMEOUT + 2)
+    update_thread.join(0.5)
+    update_out = (update_box[0] if not update_thread.is_alive()
+                  else read_update_cache(cache_dir, settings.get("updates") is not False))
+    # 13.5: how long widget_command.sh waits before the next refresh (270 s
+    # while a held / watched market is open, 900 s around the US session,
+    # 1800 s when all are closed); .cache/refresh_after after a run that
+    # got prices (deleting it goes back to 270)
+    refresh_after = refresh_after_for(tickers + watch)
+    if not all_failed:
+        ra_path = os.path.join(cache_dir, "refresh_after")
+        try:
+            with open(ra_path + ".tmp", "w") as f:
+                f.write("%d\n" % refresh_after)
+            os.replace(ra_path + ".tmp", ra_path)
+        except OSError:
+            pass
+    demo_k = demo_kind(raw_positions, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "positions.example.json"))
     out = {
         "name": str(settings["title"] or "portfolio"),
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -4947,10 +5288,14 @@ def main(argv=None, yf_module=None):
         # shows while they are), and the newest release on GitHub ({latest,
         # url, zip, checked, ok}; null until the first check, or with the
         # check switched off)
-        "demo": is_demo(raw_positions, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                    "positions.example.json")),
-        "update": update_box[0] if update_thread.is_alive() is False else None,
+        "demo": demo_k is not None,
+        # 13.5: "example" (the demo portfolio), "empty" (no holdings yet) or
+        # null — the welcome card words itself by it
+        "demoKind": demo_k,
+        "update": update_out,
         "epoch": now_epoch(),
+        # seconds until widget_command.sh starts the next refresh (13.5)
+        "refreshAfter": refresh_after,
         "currency": display,
         "marketOpen": session == "open",
         "session": session,

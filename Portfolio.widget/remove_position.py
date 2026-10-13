@@ -6,7 +6,8 @@ button runs this too).
     python3 remove_position.py MSFT 5                # sell 5 shares
     python3 remove_position.py MSFT 5 --price 190    # ...at the price you got
     python3 remove_position.py MSFT --all            # close the position
-    python3 remove_position.py --reset-all           # start over: no holdings
+    python3 remove_position.py --reset-all           # start over (keeps your _settings and _cash)
+    python3 remove_position.py --reset-all --if-demo # ...only while the list is still the demo portfolio
 
 Lots are sold oldest-first (undated lots count as oldest), so the cost of
 what you still hold stays right. Selling more than you own is an error.
@@ -20,7 +21,8 @@ values at the day's rate). A lot's cost is its avgCost, else the close the
 tracker derived for its date; when any sold lot has no known cost, basis and
 gain are null. No fees are counted.
 
---reset-all keeps only your "_settings" (the sales log goes with the old
+--reset-all keeps your "_settings" and "_cash" (the money on hand is yours,
+not a holding; the sales log and the money-in figure go with the old
 holdings), saves the old file as
 positions.backup-<date-time>.json and sets the value history aside too, so
 the graph doesn't mix the old portfolio with the new one.
@@ -116,13 +118,31 @@ def sale_record(path, ticker, entry, sold, price, slices):
     return record, text
 
 
-def reset_all(path):
+def still_demo(path, raw):
+    """True while the holdings are still the demo portfolio's (the tracker's
+    demo_kind against positions.example.json next to this script)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        import portfolio_tracker as pt
+    except Exception:           # noqa: BLE001 — cannot tell: nothing is removed
+        return False
+    return pt.demo_kind(raw, os.path.join(here, "positions.example.json")) == "example"
+
+
+def reset_all(path, if_demo=False):
     raw = pf.load(path)
+    # --if-demo (13.5, the "replace the demo holdings" choice): re-read under
+    # the edit lock, so a second buy before the list caught up cannot remove
+    # the holdings the first one added
+    if if_demo and not still_demo(path, raw):
+        pf.fail("your own holdings are in the list now — nothing removed")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = os.path.join(os.path.dirname(os.path.abspath(path)),
                           "positions.backup-%s.json" % stamp)
     pf.save(backup, raw)
-    fresh = {k: v for k, v in raw.items() if k == "_settings"}
+    # settings and cash on hand stay; _invested, _realized, _watch and the
+    # holdings go (the backup above has them)
+    fresh = {k: v for k, v in raw.items() if k in ("_settings", "_cash")}
     pf.save(path, fresh)
     cache = pf.cache_dir(path)
     # history.<CUR>.jsonl: the recorded values from before a currency switch
@@ -134,7 +154,8 @@ def reset_all(path):
             base, ext = os.path.splitext(name)
             os.replace(src, os.path.join(cache, "%s.backup-%s%s" % (base, stamp, ext)))
     pf.request_refresh(path)
-    print("cleared — old holdings saved as %s" % os.path.basename(backup))
+    print("cleared — old holdings saved as %s (settings and cash kept)"
+          % os.path.basename(backup))
 
 
 def main():
@@ -146,12 +167,14 @@ def main():
     ap.add_argument("--price", default=None,
                     help="sale price per share (omit: the last price)")
     ap.add_argument("--reset-all", action="store_true",
-                    help="remove every holding (the old file is backed up)")
+                    help="remove every holding; settings and cash stay (the old file is backed up)")
+    ap.add_argument("--if-demo", action="store_true",
+                    help="with --reset-all: only while the holdings are still the demo portfolio")
     ap.add_argument("--positions", default=os.path.join(here, "positions.json"))
     args = ap.parse_args()
 
     if args.reset_all:
-        reset_all(args.positions)
+        reset_all(args.positions, if_demo=args.if_demo)
         return
 
     if args.ticker is None:

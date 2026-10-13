@@ -41,6 +41,10 @@ and "portfolio reset-all", which drops every portfolio setting in one write)
                                                  # more than this % (0.1-50)
     python3 set_setting.py rebalanceWhole default
                                                  # let the widget choose
+    python3 set_setting.py cash 'CAD 1200'       # cash on hand (13.5): a
+                                                 # currency and an amount
+    python3 set_setting.py cash 'CAD default'    # ... that currency's gone
+    python3 set_setting.py invested 25000        # the money put in (13.5)
 
 Only these keys, stored under "_settings": showBenchmark, graphBig, compact,
 news, rebalanceWhole and alerts as true / false, position as {"x": int,
@@ -58,6 +62,16 @@ portfolioAlertThreshold as 0.1-50 (2 decimals; "default" removes them),
 alerts and rebalanceWhole also take "default" (removed). Every key is
 optional in positions.json: an old file keeps working. What "default"
 shows in data.json's "ui" is UI_DEFAULT below.
+Cash on hand and the money put in (13.5, ⚙ → Portfolio) are data, not
+settings: they are stored next to _settings, not in it, as "_cash"
+({"CAD": 1200}, the code upper-cased) and "_invested" (a number), and
+"portfolio reset-all" leaves them. cash takes 'CUR AMOUNT' (sets that
+currency; an amount of 0 removes it), 'CUR default' (removes it) or
+'default' (removes all cash); invested takes an amount or 'default' (or
+0, removing it). Amounts may be typed 1200, 1 200, 1'200, 1,250.50 or
+99,5 (0 to 1e12, 2 decimals). Both reply with the value as data.json's
+"ui" shows it: cash as the whole {CUR: amount} object ({} when none),
+invested as a number or null.
 A benchmark, currency or backtestYears change needs new data, so it also
 writes .cache/refresh.request (only when it changed): the widget's next
 refresh fetches it. So does a display change whose news page (13.1,
@@ -65,7 +79,8 @@ display_prefs.news_plan) asks for headlines the tracker did not plan
 before: a new scope, or a picked ticker without a fresh .cache/news.json
 entry — at most one such request per NEWS_REQUEST_GAP seconds (the mtime
 of .cache/news.request); per, sort, span, group, dense, sources, mute, q
-and removals never ask for one. No other key asks for a refresh.
+and removals never ask for one. A cash or invested change asks for one
+too (the totals and the returns use them). No other key asks for a refresh.
 Prints one line of JSON and nothing else: {"ok": true, "key": ...,
 "value": ...} (the value as data.json's "ui" shows it) or {"error": "..."}
 with exit 1. Standard library only, so any python3 (3.9+) can run it.
@@ -75,6 +90,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -90,7 +106,13 @@ KEYS = ("showBenchmark", "graphBig", "compact", "position", "scale", "news",
         "portfolioAlertThreshold",
         # 13.4: appearance, the update check, the welcome card, and
         # "portfolio reset-all" (every portfolio setting back to its default)
-        "theme", "opacity", "updates", "welcome", "portfolio")
+        "theme", "opacity", "updates", "welcome", "portfolio",
+        # 13.5: cash on hand and the money put in (⚙ → Portfolio)
+        "cash", "invested")
+# 13.5: keys stored at the top of positions.json, next to _settings (not in
+# it): they are data, not settings, so "portfolio reset-all" leaves them
+TOP_LEVEL = {"cash": "_cash", "invested": "_invested"}
+AMOUNT_RANGE = (0, 1e12)                    # cash / invested, in money
 THEMES = ("dark", "light", "auto")          # auto = follow the Mac's appearance
 OPACITY_RANGE = (0.3, 1)                    # how solid the window's background is
 TRUE = ("true", "1", "on", "yes")
@@ -110,13 +132,16 @@ UI_DEFAULT = {"position": None, "scale": 1, "display": None,
               "title": "portfolio", "currency": "auto", "backtestYears": 5,
               "alerts": False, "alertThreshold": 5, "portfolioAlertThreshold": 2.5,
               "rebalanceWhole": None,
-              "theme": "dark", "opacity": 0.88, "updates": True, "welcome": True}
+              "theme": "dark", "opacity": 0.88, "updates": True, "welcome": True,
+              "cash": {}, "invested": None}
 # "portfolio reset-all" (13.4): these keys leave _settings in one write (the
-# name, the targets and the windows stay); data.json's "ui" gets the defaults
+# name, the targets and the windows stay); data.json's "ui" gets the defaults.
+# 13.5: "welcome" too, so starting over brings the welcome card back
 PORTFOLIO_RESET = (("currency", "auto"), ("backtestYears", 5), ("benchmark", "auto"),
                    ("news", False), ("alerts", False), ("alertThreshold", 5),
                    ("portfolioAlertThreshold", 2.5), ("rebalanceWhole", None),
-                   ("theme", "dark"), ("opacity", 0.88), ("updates", True))
+                   ("theme", "dark"), ("opacity", 0.88), ("updates", True),
+                   ("welcome", True))
 PF_RESET = object()
 # "display reset-all": these keys leave _settings, data.json's "ui" gets
 # these values (the tracker's defaults) — one write each
@@ -159,6 +184,57 @@ def parse_number(text, lo_hi):
     return int(num) if num == int(num) else num
 
 
+THOUSANDS_RE = re.compile(r"^[1-9]\d{0,2}(,\d{3})+(\.\d+)?$")    # 1,250.50 (not 0,001)
+# cash currencies the tracker can convert (13.5): the ones its exchanges quote
+# in (portfolio_tracker SUFFIX_CURRENCY / MINOR_UNITS) plus a few common ones
+CASH_CURRENCIES = ("USD", "EUR", "GBP", "CAD", "CHF", "SEK", "NOK", "DKK", "JPY", "HKD", "AUD", "NZD",
+                   "SGD", "KRW", "TWD", "INR", "BRL", "MXN", "ZAR", "ILS", "CNY", "PLN", "CZK", "HUF",
+                   "ISK", "TRY", "THB")
+DECIMAL_COMMA_RE = re.compile(r"^\d+,\d{1,2}$")              # 99,5
+
+
+def parse_amount(text):
+    """An amount of money as typed (1200, 1 200, 1'200, 1,250.50, 99,5)
+    as a number from 0 to 1e12, rounded to 2 decimals (an int when whole),
+    or None (also for a sign, words, NaN and inf)."""
+    t = str(text).replace(" ", "").replace("'", "")
+    if THOUSANDS_RE.match(t):
+        t = t.replace(",", "")
+    elif DECIMAL_COMMA_RE.match(t):
+        t = t.replace(",", ".")
+    if t[:1] in ("+", "-"):
+        return None
+    return parse_number(t, AMOUNT_RANGE)
+
+
+def amount_view(value):
+    """A saved amount (a number or numeric text, not true/false) as data.json's
+    "ui" shows it: finite and > 0, rounded to 2 decimals (an int when
+    whole), else None (portfolio_tracker.ui_amount)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v <= 0:
+        return None
+    v = round(v, 2)
+    return int(v) if v == int(v) else v
+
+
+def cash_view(value):
+    """_cash as data.json's "ui" shows it (portfolio_tracker.ui_cash):
+    {ISO code upper-cased: amount} for 3-letter codes with an amount > 0."""
+    out = {}
+    if isinstance(value, dict):
+        for cur, amount in value.items():
+            iso, n = str(cur).strip().upper(), amount_view(amount)
+            if re.match(r"^[A-Z]{3}$", iso) and n is not None:
+                out[iso] = n
+    return out
+
+
 def parse_value(key, value):
     """(value to store, None) or (None, error). The stored value None means
     'remove the key' (back to the default)."""
@@ -176,6 +252,33 @@ def parse_value(key, value):
             return None, "title must be 1–40 characters (no line breaks), got %r" % value
         return t, None
     text = str(value).strip().lower()
+    if key == "cash":
+        # ("clear",) = all cash gone, ("drop", CUR) = that currency's gone,
+        # ("set", CUR, amount) = that much cash in CUR (13.5)
+        if text == "default":
+            return ("clear",), None
+        parts = text.split(None, 1)
+        if len(parts) == 2 and CURRENCY_RE.match(parts[0]):
+            cur = parts[0].upper()
+            if parts[1].strip() == "default":
+                return ("drop", cur), None
+            if cur not in CASH_CURRENCIES:
+                return None, ("cash currency %s is not one the widget knows (%s, …)"
+                              % (cur, ", ".join(CASH_CURRENCIES[:8])))
+            num = parse_amount(parts[1])
+            if num == 0 and re.sub(r"[0.,\s']", "", parts[1]):
+                return None, "cash amount %r is too small (2 decimals at most) — 0 removes it" % parts[1].strip()
+            if num is not None:
+                return (("drop", cur) if num == 0 else ("set", cur, num)), None
+        return None, ("cash must be a currency and an amount, like CAD 1200 "
+                      "(or CAD default to remove it), got %r" % value)
+    if key == "invested":
+        if text == "default":
+            return None, None
+        num = parse_amount(text)
+        if num is None:
+            return None, "invested must be an amount of money, like 25000, or default, got %r" % value
+        return (num or None), None          # 0 removes it too
     if key == "portfolio":
         if text == "reset-all":
             return PF_RESET, None
@@ -351,6 +454,69 @@ def request_news_refresh(positions):
         return False
 
 
+def update_top_level(raw, key, value):
+    """cash / invested (13.5): change raw["_cash"] / raw["_invested"] in
+    place. Returns (changed, the new value as data.json's "ui" shows it);
+    changed compares the amounts as numbers (1200 = 1200.0)."""
+    if key == "invested":
+        if value is None:
+            changed = "_invested" in raw
+            raw.pop("_invested", None)
+        else:
+            changed = amount_view(raw.get("_invested")) != value
+            raw["_invested"] = value
+        return changed, amount_view(raw.get("_invested"))
+    cash = raw.get("_cash")
+    if cash is None:
+        cash = {}
+    if not isinstance(cash, dict):
+        pf.fail("_cash in positions.json should be an object — fix it first")
+    if value[0] == "clear":
+        changed = bool(cash)
+        cash = {}
+    else:
+        cur = value[1]
+        # the same code typed in lower case earlier goes too
+        others = [k for k in cash if k != cur and str(k).strip().upper() == cur]
+        changed = bool(others)
+        for k in others:
+            del cash[k]
+        if value[0] == "drop":
+            changed = changed or cur in cash
+            cash.pop(cur, None)
+        else:
+            changed = changed or amount_view(cash.get(cur)) != value[2]
+            cash[cur] = value[2]
+    if cash:
+        raw["_cash"] = cash
+    else:
+        changed = changed or "_cash" in raw
+        raw.pop("_cash", None)
+    return changed, cash_view(cash)
+
+
+def save_top_level(positions, key, value):
+    """set_setting.py cash / invested: one write (none when nothing
+    changed), data.json's "ui" patched, a refresh asked for when it changed
+    (the totals and the returns use them); replies and exits."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            raw = pf.load(positions)
+            changed, new = update_top_level(raw, key, value)
+            if changed:
+                pf.save(positions, raw)
+        patch_cached_ui(positions, {key: new})
+        if changed:
+            pf.request_refresh(positions)
+    except SystemExit:
+        msg = buf.getvalue().strip()
+        reply({"error": msg[len("error: "):] if msg.startswith("error: ") else msg or "failed"}, 1)
+    except Exception as e:
+        reply({"error": "could not save: %s" % e}, 1)
+    reply({"ok": True, "key": key, "value": new})
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = JsonArgs()
@@ -366,6 +532,10 @@ def main():
         reply({"error": err}, 1)
     if not os.path.exists(args.positions):
         reply({"error": "no positions file yet"}, 1)
+    if args.key in TOP_LEVEL:
+        # cash / invested sit next to _settings, not in it (no empty
+        # _settings is made for them); they ask for a refresh when changed
+        save_top_level(args.positions, args.key, value)
 
     # portfolio_file's load/save: pf.fail prints plain text and exits, so
     # its message is caught and passed on as JSON
@@ -412,7 +582,8 @@ def main():
             # new data needed (none for the choice already saved): one fetch
             # with the new index / in the new currency / over the longer
             # history (whose long history the history job then plans like
-            # any other). No other key asks for one.
+            # any other). cash / invested ask for one in save_top_level
+            # (they never get here). No other key asks for one.
             pf.request_refresh(args.positions)
         if args.key == "display" and changed and value is not display_prefs.RESET:
             # a news page asking for headlines the tracker never planned

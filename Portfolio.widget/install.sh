@@ -28,6 +28,15 @@ fi
 
 echo "Using $("$PY" --version 2>&1) at $(command -v "$PY")"
 mkdir -p "$(dirname "$VENV")"
+# one setup at a time (13.5): a second click on "run setup in Terminal" must not
+# build the same venv at the same time; a lock left by a crash goes after 30 min
+LOCK="$(dirname "$VENV")/install.lock"
+find "$LOCK" -maxdepth 0 -mmin +30 -exec rmdir {} \; 2>/dev/null || true
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "setup is already running in another window — let that one finish."
+  exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 "$PY" -m venv "$VENV"
 "$VENV/bin/python3" -m pip install --quiet --upgrade pip
 "$VENV/bin/python3" -m pip install --quiet -r "$DIR/requirements.txt"

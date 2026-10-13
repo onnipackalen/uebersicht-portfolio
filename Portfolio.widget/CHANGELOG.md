@@ -1,5 +1,105 @@
 # Changelog
 
+## 13.5
+
+- **The ⚙ gear is always faintly visible**: it rests at 35 % and brightens
+  when you point at the window or while its editor is open (it used to
+  appear only on hover). The ⠿ move and resize grips still show on hover
+  only.
+- **Light look**: heat-map sector names, the sector weight bars (now
+  thicker, with a visible track), the index line and the gridlines are
+  readable now; the graphs' shaded area is a touch stronger.
+- **+ form**: Return adds the stock, and Return confirms the line the
+  widget then asks (Esc cancels; holding Return down does not confirm).
+  Dates in the usual orders — `2024-03-01`, `01.03.2024`, `01/03/2024`
+  (day first); a future or impossible date is refused. After a buy the
+  form says in plain words when the new row appears ("added 10 × KO — it
+  shows in the list after the next refresh (about a minute)"), and the row
+  is shaded briefly when it does.
+- **Holdings list**: starts on page 1 and turns a page every 30 s instead
+  of 15; bigger page dots with **‹ ›** arrows (click one to stay on a
+  page, ⌖ shows it is held, click the dot again to let it turn); the
+  **N/N** count in the header goes to the next page; a small legend line
+  names the columns that fit (ticker · 3 mo · vol · drift · day · price ·
+  value · p&l).
+- **Welcome card**: the step chips look like buttons; **hide** says the
+  way back — ⚙ → Portfolio → **welcome card** (`welcome` in `_settings`;
+  **reset portfolio settings** brings it back too). It stays until the
+  first holding of your own; an emptied list shows "demo removed — add
+  your first holding:". The first add or import over the demo offers to
+  **replace the 22 demo holdings** (recommended — a backup of the file is
+  kept, your settings and cash stay) or **keep them**. `sell --reset-all`
+  (and **start fresh**) now keeps `_settings` and `_cash`.
+- **Cash on hand and money put in** are set in ⚙ → Portfolio — no more
+  editing the file: **cash on hand** (an amount per currency; typing a
+  currency again replaces it, × removes it) and **money put in so far**
+  (in the portfolio currency). `set_setting.py cash 'CAD 1200'` /
+  `'CAD default'` / `default` and `invested 25000` / `default`; still
+  stored as `_cash` and `_invested` next to `_settings`, and **reset
+  portfolio settings** leaves both alone. The header's profit tips point
+  there.
+- **Easier settings**: the **background** is a slider (30–100 %, live as
+  you drag, saved when you let go) with quick picks **normal** and
+  **lighter**; plainer words
+  and hints in ⚙ (**left-side boxes**, size, collapse, new window,
+  history, compare with an index); **rebalancing suggests** shows only once
+  a target mix is set and says so otherwise; the find box knows every row
+  and its hint.
+- **Import reads more broker files correctly**: lines like `ITW 1, MSFT 2`
+  and `KO 1,000` are no longer mistaken for CSV, and `KO 1,000, MSFT 5`
+  keeps its thousands separator; `;` files with decimal commas pick the
+  right separator; a "Price" column next to an "Average Cost" column no
+  longer wins (a lone "Price" column gets a "check it" note);
+  `10 KO, 5 MSFT` becomes two rows instead of one with a wrong price, and
+  two stocks on one line or an unclear price are skipped with a note
+  rather than guessed; dates like `01-03-2024`, `2024/03/01` and
+  `Mar 1, 2024` work, a future or impossible date is skipped with a note
+  instead of becoming today; Windows-encoded (cp1252) files open;
+  `TSX:SHOP` becomes `SHOP.TO` and `LSE:VOD` becomes `VOD.L` (the preview
+  says so); a currency code after the ticker (`KO 10 at 50 USD`) is
+  understood. The preview's notes wrap instead of being cut off.
+- **Kinder to Yahoo Finance**: far fewer requests at night and at
+  weekends, no stall when GitHub is slow. The widget refreshes every
+  4.5 min while a market you hold or watch is open, every 15 min around
+  the US session (pre-market and after-hours) and every 30 min when all
+  are closed — never past the next open; a crypto or currency pair counts
+  as always open (`.cache/refresh_after`, `refreshAfter` in data.json; the
+  footer's update time says "markets closed — next check in N min" on
+  hover). Daily and hourly bars are fetched hourly while a market is open
+  and once after its close, not all night; at most 20 earnings / dividend
+  re-checks per refresh, oldest first (new holdings at once), their
+  expiries spread by ±15 %; the update check never holds up a refresh any
+  more (a slow GitHub shows the last known answer).
+- **Setup from a button; plain-language error card; clearer install
+  steps**: before the first prices, the card has **run setup in
+  Terminal** (opens Terminal and runs install.sh) and **check again
+  now**, and the command to paste is selectable with a **copy** link
+  (`widget_command.sh setup run | check`). When a refresh fails with no
+  data yet, one plain line says why (positions.json has a typo near line
+  N, Python lost its yfinance package, Yahoo Finance is busy or
+  unreachable) with **show file**, **run setup in Terminal** or **try
+  again now** as fits, and **details** shows the raw log. The compact
+  header's **!** and the footer's **last refresh failed** start their hover
+  text with the same plain reason. install.sh refuses to run twice at
+  once.
+- **Small fixes**: the footer says "17 values recorded", not "17
+  snapshots"; the updates row's all-good note is grey, only problems are
+  amber; the help text names the real chips **reset all windows** /
+  **reset this window**; the graph caption wraps at the dots instead of
+  cutting a word in a narrow window (and drops the index symbol when the
+  index picker beside it names it); the first-run card says to copy the
+  whole bash line, the welcome card says the 22 holdings are a demo, the
+  empty list points to the + form's import; a leftover "updating…" note
+  no longer hides the "updated to 13.5 ✓" line after an update.
+- Tests: `run_all.py` sections `features135` (settings, tracker, helpers,
+  import, shell, jsx and page checks) and `budget` (Yahoo requests per
+  refresh on 60 holdings: cold ≤ 6 per holding, warm and at night 1 per
+  holding, the next day's re-checks ≤ 20, the history job ≤ holdings + 2);
+  the page checks refuse to run against anything but a scratch demo
+  folder with a `.scratch-demo` marker; the news page's movers checks no
+  longer depend on the date (the fake's planned jumps now outweigh its
+  random daily moves). The README links three more pictures (`docs/`).
+
 ## 13.4
 
 - **Light look, or follow the Mac**: ⚙ → Portfolio → **look** — dark (as

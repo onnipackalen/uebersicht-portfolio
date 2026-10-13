@@ -1,9 +1,13 @@
 #!/bin/bash
-# widget_command.sh — what Übersicht runs every 2 s. It never blocks:
+# widget_command.sh — what Übersicht runs every 5 s. It never blocks:
 #   * fresh cache     -> prints it, status "ready"
 #   * stale / missing -> starts portfolio_tracker.py in the background and
 #                        prints the last cache (if any), status "loading"
 #   * fetch running   -> prints the cache plus the fetch's live progress
+#   * how old "fresh" is comes from the tracker: .cache/refresh_after holds
+#     its wait in seconds (270 s while a market you hold or watch is open,
+#     900 s around the US session, 1800 s when all are closed; never past
+#     the next open). Delete the file to go back to 270 s.
 #   * after a refresh that left .cache/history.needed behind, a second
 #     background job downloads the long price history (older than the one
 #     year a refresh fetches) — "historyProgress" in the output while it runs
@@ -14,6 +18,8 @@
 #   widget_command.sh watch|unwatch TICKER         -> monitor without holding
 #   widget_command.sh buy  TICKER SHARES [--cost X] [--date YYYY-MM-DD]
 #   widget_command.sh sell TICKER SHARES|--all [--price X]
+#   widget_command.sh sell --reset-all [--if-demo]  -> clear the holdings (--if-demo: only
+#                                                     while they are still the demo portfolio)
 #   widget_command.sh days BEFORE_DATE [COUNT]     -> older day-by-day rows
 #   widget_command.sh alert add TICKER KIND VALUE  -> price alert (JSON only);
 #                     alert remove ID | alert list    KIND above|below|
@@ -24,6 +30,7 @@
 #   widget_command.sh import preview|commit --text LIST | --file PATH   (13.4)
 #                     import choose          -> a native "choose file" dialog
 #   widget_command.sh update check | run [ZIP_URL]   -> the newest release (13.4)
+#   widget_command.sh setup run | check   -> run install.sh in Terminal / look again now (13.5)
 #
 # Python: the first interpreter that can `import yfinance` wins — the path
 # written in python.txt (next to this file) if you made one, then the venv
@@ -45,7 +52,8 @@
 #     orphans the tracker), and only if the PID is still ours — after a
 #     reboot a stale lock can name some unrelated process.
 
-MAX_CACHE_AGE=270      # seconds — refetch when the data is older (~4.5 min)
+MAX_CACHE_AGE=270      # seconds — refetch when the data is older (~4.5 min);
+                       # .cache/refresh_after (60..3600) replaces it (13.5)
 MAX_FETCH_SECONDS=360  # seconds — a fetch running longer counts as hung
 RETRY_AFTER=120        # seconds — wait this long after a FAILED fetch,
 MAX_RETRY_AFTER=1800   # ... twice as long after each further failure in a row
@@ -70,6 +78,7 @@ LOG_FILE="$CACHE_DIR/fetch.log"
 FAIL_FILE="$CACHE_DIR/fetch.failed"
 SETUP_FILE="$CACHE_DIR/setup_needed"
 REQ_FILE="$CACHE_DIR/refresh.request"   # written by the buy/sell helpers
+REFRESH_AFTER_FILE="$CACHE_DIR/refresh_after"   # the tracker's wait (13.5)
 PY_CACHE="$CACHE_DIR/python_path"
 PY_OVERRIDE="$SCRIPT_DIR/python.txt"
 HIST_NEEDED="$CACHE_DIR/history.needed"      # written by the tracker
@@ -121,6 +130,9 @@ json_string() {
   s=${s//$'\n'/\\n}
   printf '"%s"' "$s"
 }
+
+# a value as one single-quoted shell word: each ' becomes '\'' (13.5)
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 # Prints the path of a python3 that has yfinance (or, with "any", any
 # python3 at all — the buy/sell helpers only need the standard library).
@@ -190,7 +202,9 @@ case "$1" in
     # reset-all = every display choice back to default in one write) and,
     # since 13.2, the portfolio's own settings from ⚙ → Portfolio (title,
     # currency, backtestYears, alerts, alertThreshold,
-    # portfolioAlertThreshold; "default" removes a key). The value is ONE
+    # portfolioAlertThreshold; "default" removes a key), and cash and
+    # invested (13.5: _cash / _invested next to _settings; both ask for a
+    # refresh). The value is ONE
     # argument ($3): spaces are allowed ("setting title 'My money'"), and
     # the "--" keeps a negative number like a position -120,40 or a title
     # starting with "-" a value, not an option. A benchmark, currency or
@@ -299,6 +313,38 @@ case "$1" in
         exec bash "$tmp/update.sh" --target "$SCRIPT_DIR" --temp "$tmp" 2>/dev/null
         ;;
       *) echo '{"error": "update takes check or run"}'; exit 0 ;;
+    esac
+    ;;
+  setup)
+    # the "run setup" chip (13.5): "run" opens Terminal on install.sh — the
+    # command reaches AppleScript as argv, so spaces, umlauts and quotes in
+    # the folder name need no AppleScript escaping; "check" does what
+    # install.sh's last lines do, so the widget looks for Python again now
+    # (refresh.request forces one fetch past the back-off; a still-missing
+    # Python writes setup_needed again). JSON on stdout only, nothing on
+    # stderr — Übersicht's run() treats stderr as a failure.
+    case "$2" in
+      run)
+        cmd="bash $(shq "$SCRIPT_DIR/install.sh")"
+        if [ -n "$PORTFOLIO_SETUP_DRYRUN" ]; then
+          printf '{"ok": true, "dryRun": true, "command": %s}\n' "$(printf '%s' "$cmd" | json_string)"
+          exit 0
+        fi
+        if osascript -e 'on run argv' -e 'tell application "Terminal"' -e 'activate' \
+             -e 'do script (item 1 of argv)' -e 'end tell' -e 'end run' "$cmd" >/dev/null 2>&1; then
+          echo '{"ok": true}'
+        else
+          echo '{"ok": false, "error": "could not open Terminal"}'
+        fi
+        exit 0
+        ;;
+      check)
+        rm -f "$SETUP_FILE" "$PY_CACHE" 2>/dev/null
+        : > "$REQ_FILE" 2>/dev/null
+        echo '{"ok": true}'
+        exit 0
+        ;;
+      *) echo '{"error": "setup takes run or check"}'; exit 0 ;;
     esac
     ;;
 esac
@@ -426,8 +472,18 @@ if [ -s "$FAIL_FILE" ]; then
   fi
 fi
 
+# the tracker's own wait (slower while the markets are closed), when it
+# is a whole number of seconds from 60 to 3600; else MAX_CACHE_AGE
+max_age=$MAX_CACHE_AGE
+refresh_after=$(cat "$REFRESH_AFTER_FILE" 2>/dev/null)
+refresh_after=${refresh_after//[[:space:]]/}
+if [[ "$refresh_after" =~ ^[0-9]{2,4}$ ]] && [ "$((10#$refresh_after))" -ge 60 ] && \
+   [ "$((10#$refresh_after))" -le 3600 ]; then
+  max_age=$((10#$refresh_after))
+fi
+
 want_fetch=false
-[ "$age" -ge "$MAX_CACHE_AGE" ] && [ "$fail_age" -ge "$fail_wait" ] && want_fetch=true
+[ "$age" -ge "$max_age" ] && [ "$fail_age" -ge "$fail_wait" ] && want_fetch=true
 # A buy/sell asked for fresh data. If a fetch is already running it read the
 # old file, so the marker waits and triggers one more fetch after it.
 [ -e "$REQ_FILE" ] && want_fetch=true
