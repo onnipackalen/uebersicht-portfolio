@@ -2,8 +2,9 @@
 
 A desktop widget for [Übersicht](https://tracesof.net/uebersicht/) that tracks
 a stock portfolio: total value and a value graph, your holdings as a list or a
-heatmap, a volatility score for every stock, upcoming earnings, and optional
-alerts on big moves. Prices come from Yahoo Finance.
+heatmap, a volatility score for every stock, upcoming earnings and dividends,
+a note and a price target per stock, a goal to aim for, and optional alerts on
+big moves. Prices come from Yahoo Finance.
 
 ![screenshot](screenshot.png)
 
@@ -72,8 +73,8 @@ your first holding, the widget offers to **replace the 22 demo holdings
 the file is kept. A new holding shows in the list at the next refresh (about
 a minute).
 
-After the demo is removed the card reads "demo removed — add your first
-holding:" until you add one. It goes away by itself once the holdings are
+After the demo is removed the card reads "no holdings yet — add your first:"
+until you add one. It goes away by itself once the holdings are
 yours; **hide** closes it earlier, and **⚙ → Portfolio → welcome card** brings
 it back.
 
@@ -94,8 +95,8 @@ when you point at the window) — opens that window's settings, in three
 groups:
 
 - **Portfolio** — what every window shares: name, currency, cash on hand,
-  money put in, history, index, headlines, alerts, look, background, updates,
-  welcome card.
+  money put in, a goal to reach, history, index, headlines, alerts, target
+  mix, look, background, updates, welcome card.
 - **This window** — its name, size, zoom, new windows, reset.
 - **What it shows** — tick the parts this window displays.
 
@@ -104,16 +105,23 @@ matching rows. Most rows have a one-line hint (**hide hints** hides them). You
 rarely need to edit a file: *Settings* in the reference says where each
 setting lives.
 
+**Changed something by mistake?** For 3 minutes after a settings change, the
+header of ⚙ shows **undo: …** with what you changed (for example "undo: the
+index"); a click puts that one setting back. Undo goes back one change at a
+time, up to 5 changes from the last day — a buy, sale or alert made since
+stays as it is.
+
 ## Where your data lives
 
 Everything stays on your Mac, in the widget folder
 (`~/Library/Application Support/Übersicht/widgets/Portfolio.widget/`):
 
-- `positions.json` — your holdings, settings, cash and alerts
-  (**+ → show file** shows it in Finder).
+- `positions.json` — your holdings, settings, cash, alerts, notes and
+  price targets (**+ → show file** shows it in Finder).
 - `.cache/` — the value history the widget records, and downloaded prices.
 - `positions.backup-….json` — backups: one each weekday, one before every
-  import and every "start fresh".
+  import and every "start fresh", and one before each settings change (the
+  newest 10 of those are kept).
 - `~/Documents/Portfolio/` — CSV files, only when you click **export**.
 - `~/.portfolio-widget/` — the Python environment from `install.sh`, and
   copies of the previous code after an update.
@@ -129,7 +137,9 @@ Updating keeps all of it (see *Updating*).
   right in the widget.
 - **Any currency mix**: each holding is converted to your currency (any code —
   USD, EUR, GBP, SEK, JPY, CHF… — picked from your Mac's region) at live
-  exchange rates, and past values at that day's rate.
+  exchange rates, and past values at that day's rate. A **currencies**
+  panel shows how much sits in each currency and what currency moves did
+  today and since you bought.
 - **Years of history**: the graph and the day-by-day table reach back 5 years
   by default (or 3, 10, or everything — ⚙ → Portfolio → history), and to your
   earliest purchase when that is older. The long history downloads in the
@@ -156,8 +166,10 @@ Updating keeps all of it (see *Updating*).
   once from a pasted list or a CSV file. When a new version is out, the
   widget says so — one click updates it and keeps your holdings.
 - **Returns that mean something**: real annual return (XIRR), time-weighted
-  return, realized gains, dividends, drawdown, beta, an index to beat, target
-  mix with rebalancing trades, price alerts, CSV export and a menu-bar summary.
+  return, realized gains, dividends (with the next ex-dividend dates and the
+  income of each year), drawdown, beta, an index to beat, a goal with your
+  progress, a target mix with rebalancing trades, price alerts, a note and a
+  price target per stock, CSV export and a menu-bar summary.
 
 ## Adding and selling stocks
 
@@ -168,10 +180,10 @@ you to confirm with its real name and price — Return confirms that line, Esc
 cancels it. Leave the price empty to use today's price; add a date in
 **bought on** for older purchases (then that day's closing price is used
 unless you give one) — `2024-03-01`, `01.03.2024` or `03/01/2024` (day first)
-all work. After a buy the form says "added 10 × KO — it shows in the list
-after the next refresh (about a minute)", and the new row is shaded for a
-moment when it arrives. **sell** works the same way (`all` sells the whole
-position).
+all work. After a buy the form says "added 10 × KO — in the list within a
+minute", and the new row is shaded for a moment when it arrives. **sell**
+works the same way (`all` sells the whole position; "sold all of KO — the
+list catches up within a minute").
 
 **look** opens the stock's detail view without adding it — price, day move,
 1H/1D/1W/1M/3M/1Y chart, volatility score, next earnings — and **watch** puts
@@ -183,7 +195,9 @@ detail view; from there you can watch/unwatch it or start a buy.
 **Many at once — import a list.** Click **+ → import a list…**, paste one
 holding per line — `KO 10`, `MSFT 5 at 310 on 2024-03-01`, `SHOP.TO 12 @
 61.5` — or your broker's CSV export (or **choose a file…** to pick it), press
-**preview**, look over the rows, then **add N holdings**. Columns named
+**preview**, look over the rows (a grey line names the columns: stock,
+shares, price, date, note — a row the widget could not read has its ticker
+in amber), then **add N holdings**. Columns named
 symbol / ticker, quantity / shares, average cost / price (or a book value,
 divided by the shares) and purchase / trade date are recognised; numbers may
 carry currency signs and thousands separators, dates may be `2024-03-01`,
@@ -208,7 +222,8 @@ dividends received.
 
 **Cash and money put in.** ⚙ → Portfolio → **cash on hand** takes money that
 is not invested, one amount per currency (type `1200`, the currency, Enter or
-**add**; × removes one) — it is counted in the total and used by the
+**add**; × removes one after asking "remove CAD 1,200?" — **yes, remove** or
+**no**) — it is counted in the total and used by the
 rebalance panel. **money put in so far** is everything you have paid in, in
 the portfolio currency; the profit line in the header can then be shown
 against it (click it). Buys and sells in the widget keep it up to date. Both
@@ -221,6 +236,35 @@ from the shares you held on each payment date — lots with a purchase date,
 including shares sold since 12.7 (undated lots and older sales can't be
 placed in time, so they don't count). Upcoming ex-dividend dates are tagged in
 the earnings list. The panel hides when nothing you hold pays.
+
+A small switch under the yield line picks what the panel shows (each window
+has its own choice; it is not saved):
+
+- **12 months** (the default) — the 12 monthly bars above.
+- **next dates** — the next ex-dividend dates of your holdings in the coming
+  90 days, up to 4 rows ("+3 more in the next 90 days" lists the rest), with
+  about how much the shares you hold would get. Own the shares before that
+  day to get the payment. **expected** means the company has not announced it
+  yet and the widget assumes about a year after last year's payment; "paid
+  Nov 30" appears once the company has announced the pay day.
+- **by year** — what your shares earned in each of the last 5 calendar years
+  (by ex-dividend date, at today's exchange rate, "2026 so far" for this
+  year) and how many holdings paid; anything older is summed in a "before …"
+  row. It needs purchase dates, like the received line.
+
+A chip is left out while there is nothing for it to show.
+
+**Notes and price targets.** Open a stock (click its ticker) and, under its
+figures, click **add a note** — a line for yourself, up to 200 characters,
+like why you bought it — or **set a price target**, a price you are waiting
+for in the stock's own currency (`72`, `72.50` or `72,5`). The target row then
+shows how far away the price is ("72.00 USD · 8.2% away"), turns amber with
+**reached** once the price gets there, and **alert me** adds a price alert at
+that price, so you also get a Mac notification. Return or **save** saves,
+**clear** removes, **cancel** or Esc closes the box. A **✎** after the ticker
+in the list (and the watchlist) shows which stocks have one — hover it to
+read them. It works for held, watched and looked-up stocks; selling
+everything keeps the note, and "start fresh" removes them with the holdings.
 
 ## Reading the graph
 
@@ -307,23 +351,47 @@ your watchlist, 24 at a time — "later ›" pages through the rest.
 
 ## Targets and rebalancing
 
-Tell the widget what mix you're aiming for in `_settings.targets` (this one
-is set in the file only) — tickers or sector names (as shown in the widget)
-plus `"cash"`, in percent of the whole portfolio:
+Tell the widget what mix you're aiming for in **⚙ → Portfolio → target mix**,
+in percent of everything (holdings and cash). While none is set the row reads
+"not set — the rebalancing panel needs one", with two chips:
+
+- **set one** — an empty row for each of your sectors, plus cash;
+- **start from today's mix** — the same rows filled in with each sector's
+  share today (adding up to 100 %), so you only change what you want.
+
+Type a % in each row; an empty row counts as 0 %. **by holding** next to a
+sector splits it into its holdings, each with its own % (**as one** joins it
+again). The line at the top adds it up as you type: "adds up to 100 % ✓",
+"7 % left to place" or "3 % too much — lower a row"; a field turns red when it
+is not a number from 0 to 100. Press Return in any field or click **save
+target mix** — it takes effect on the next update (about a minute). **undo
+changes** goes back to the saved mix, **use today's mix** fills in today's
+shares, and **remove target mix** (it asks first) turns all of this off.
+Unsaved changes are dropped when you close ⚙. A stock you no longer hold is
+named ("not held any more: … — left out when you save").
+
+With a target mix, each holding gets a small **off-target** badge
+(percentage points above or below target; orange when over), the heatmap gets
+a **drift** tab that colours each tile by how far it is off target, and a **rebalance** panel lists the trades that move
+the fewest dollars to get everything within ±1 point of target — in whole
+shares or fractional, never spending cash you don't have — plus where new
+money should go first. Click the panel's heading to open the target mix in
+⚙. ⚙ → Portfolio → **rebalancing suggests** picks whole shares, fractions of
+a share, or lets the widget choose. Holdings without a target count as 0%.
+With no target mix, none of this shows.
+
+The mix is saved as `_settings.targets` (sector names as the widget shows
+them, tickers, and `"cash"`):
 
 ```json
 "targets": {"Tech": 30, "Health care": 20, "Financials": 15, "KO": 10, "cash": 5, "Energy": 20}
 ```
 
-Each holding then gets a small **drift** badge (percentage points above or
-below target; orange when over), the heatmap gets a **drift** colouring, and a
-**rebalance** panel lists the trades that move the fewest dollars to get
-everything within ±1 point of target — in whole shares or fractional, never
-spending cash you don't have — plus where new money should go first. Once
-targets are set, ⚙ → Portfolio → **rebalancing suggests** picks whole shares,
-fractions of a share, or lets the widget choose. The widget warns when targets
-don't add up to 100 or name something you don't hold. Holdings without a
-target count as 0%. With no targets, none of this shows.
+You can still write it by hand, or from Terminal:
+`python3 set_setting.py targets '{"Tech": 30, "KO": 10, "cash": 5}'`
+(`targets default` removes it). A name that is not one of your holdings,
+sectors or cash is refused, and so is a ticker whose sector has a % too —
+give one or the other.
 
 ## Returns and risk
 
@@ -338,6 +406,40 @@ now, and the worst drop with its date), **beta** against your index and the
 **Sharpe ratio** ((annual return − 4%) ÷ annual volatility). The same figures
 for the backtest years are shown separately, labelled e.g. "(backtest, 10y)".
 Hover a holding for its 52-week closing high.
+
+**A goal.** In ⚙ → Portfolio → **a goal to reach**, type an amount and a
+year (`250000` by `2035`) or a day (`2035-06-30`), then Return or **save**
+(**remove** takes it away). The header then gets a goal line like "goal
+$250,000 by 2035 · 40%" with a small progress bar. After a year of history
+it also says whether your annual return so far gets you there — **on
+track** (green) or e.g. "29% short at your pace so far" (just "29% short" in
+a narrow window) — and later **reached** or **date passed**. Hover it for the
+arithmetic: today's holdings grown at your money-weighted annual return
+until the goal date, cash counted as it is, and the yearly return you would
+need. It is simple arithmetic on your past return, not a forecast. The goal
+is kept in the currency you set it in; if you change the portfolio currency
+and no exchange rate is known, ⚙ asks you to save it again. Switch the line
+off per window in ⚙ → What it shows → **goal**.
+
+## Currencies
+
+When you hold anything outside your display currency (a US stock in a CAD
+portfolio, cash in another currency), a **currencies** panel shows, biggest
+first: each currency's share of the portfolio (cash included) with a bar,
+its value, and what that currency's move did today. Under the rows:
+
+- **today: prices … · currency moves …** — today's change, split into the
+  share prices moving and the currencies moving against yours.
+- **since you bought: prices … · currency moves …** — the gain on what you
+  hold now, split the same way. "prices" is the P&L in the header (counted at
+  today's exchange rates); "currency moves" is what the exchange rate added or
+  took away since each purchase, using that day's rate. Hover for the total.
+
+Hover a currency for today's rate and the average rate you bought at. The
+move since purchase shows "—" when it can't be worked out — a holding in that
+currency has no purchase date or no purchase price, or the older exchange
+rates are still loading. The panel hides when everything is in one currency;
+switch it in ⚙ → What it shows → **currencies**.
 
 ## Volatility scores
 
@@ -369,7 +471,9 @@ bottom-right corner (they appear on hover) — this changes the real width and
 height, and the content adjusts: one column when narrow, two or three when
 wide, a bigger or smaller graph, more or fewer rows, and panels folding away
 when there isn't room ("+N hidden — ⚙" says what). Double-click an edge to go
-back to the default width or to "fit content".
+back to the default width or to "fit content". In a window narrower than
+400 px the graph's date box is left out, the change figure and ⤢ move to the
+end of the tabs line, and the ⚙ title drops the window's name.
 
 A long holdings list is paged and turns a page every 30 s, starting on page 1:
 click ‹ › or a dot to stay on a page (⌖ shows it is held; click the dot again
@@ -377,25 +481,32 @@ to let it turn), or the N/N count for the next page. A small line under the
 HOLDINGS header names the columns (ticker · 3 mo · vol · day · value · p&l —
 only those that fit); hover one for what it means.
 
+In the **heatmap**, two or more holdings of one sector that are too small for
+a label are joined into one "+3" tile (it cannot be clicked); hover it for
+which holdings they are, their value and how they moved together.
+
 **⚙** (the faint gear at the right of the title row; it brightens when you
 point at the window) opens the settings for that window — three groups, most
 rows with a one-line hint (the **hide hints** chip hides the hints). The
 **find a setting…** box at the top shows only the rows whose name or hint
-contains what you type ("zoom", "news", "resize", "dividends"…), across all
-three groups.
+contains what you type ("zoom", "news", "resize", "dividends", "since",
+"muted"…), across all three groups — the news page options included.
 
 - **Portfolio** — settings the whole portfolio shares, no file editing
   needed: **portfolio name**, **currency**, **cash on hand**, **money put in
-  so far**, **history** (3 · 5 · 10 years · everything), **compare with an
-  index**, **headlines** on/off, **big-move alerts** on/off with both
-  thresholds, **rebalancing suggests** (once targets are set), the **look**
+  so far**, **a goal to reach** (see *Returns and risk*), **history** (3 · 5
+  · 10 years · everything), **compare with an index**, **headlines** on/off,
+  **big-move alerts** on/off with both thresholds, **target mix** (see
+  *Targets and rebalancing*), **rebalancing suggests** (once a target mix is
+  set), the **look**
   (dark · light · follow my Mac), the **background** (a slider from glass to
   solid, 30–100 %, live as you drag; quick picks normal and lighter),
   **updates** (check once a day · never · check now) and the **welcome card**
   (show · hide). **reset portfolio settings** puts currency, history, index,
   headlines, alerts, rebalancing, look, background, updates and the welcome
-  card back to their defaults — your holdings, the name, targets, windows,
-  cash and money put in stay. A change that needs new prices says "takes
+  card back to their defaults — your holdings, the name, the target mix, the
+  goal, windows, cash and money put in stay. **undo: …** in the ⚙ header puts
+  the last change back (see *The ⚙ settings*). A change that needs new prices says "takes
   effect on the next update (about a minute)" until it has; a longer history
   says "loading more history — the graph fills in over the next few minutes".
 - **This window** — its **window name** (empty = the portfolio's name),
@@ -490,11 +601,13 @@ stays folded after Übersicht restarts, and dragging the title still moves the
 widget. (**⚙ → This window → collapse to one line** does the same for one
 window.)
 
-**Export.** "export" in the footer writes three CSV files to
+**Export.** "export" in the footer writes four CSV files to
 `~/Documents/Portfolio/` and shows them in Finder: `holdings.csv` (each
 purchase with its cost, plus cash), `daily_values.csv` (the whole day-by-day
-history with the money put in and the index) and `sales.csv` (sales recorded
-since 12.7). They open in Numbers and Excel (UTF-8, ISO dates, plain numbers;
+history with the money put in and the index), `sales.csv` (sales recorded
+since 12.7) and `dividends.csv` (every dividend your shares earned, by
+ex-dividend date — holdings you own now, dated purchases and recorded sales
+only — at today's exchange rate). They open in Numbers and Excel (UTF-8, ISO dates, plain numbers;
 in Excel with a comma as decimal separator, use Data → From Text). macOS may
 ask once whether Übersicht may use your Documents folder. From Terminal:
 `python3 export.py`, or `PORTFOLIO_EXPORT_DIR=/some/folder python3 export.py`.
@@ -503,6 +616,14 @@ ask once whether Übersicht may use your Documents folder. From Terminal:
 `positions.json` to `positions.backup-YYYYMMDD-HHMMSS-daily.json` in the widget
 folder and keeps the newest 30. "Start fresh" backups (`--reset-all`) are
 never touched. To restore, copy a backup over `positions.json`.
+
+**Settings backups.** Every settings change first saves a copy of
+`positions.json` (`positions.backup-YYYYMMDD-HHMMSS-setting.json`, at most
+one every 10 seconds, the newest 10 kept), and ⚙ can undo the last change:
+it puts back only that setting, so a buy or sale made since is kept. Undo
+goes back one change at a time, up to 5 changes from the last day. Quick
+repeated changes to the same setting within 10 seconds (like a drag or a
+slider) count as one change. From Terminal: `python3 set_setting.py undo`.
 
 **Menu bar** (optional, with [SwiftBar](https://swiftbar.app) or
 [xbar](https://xbarapp.com)): shows e.g. "$32.3k +0.8%" and a small dropdown,
@@ -534,6 +655,11 @@ By hand: `bash update.sh` in the widget folder does the same (it needs
 and keep the data files named above. Settings and files from older versions
 keep working.
 
+If an update fails half-way, it puts the old files back by itself ("the
+update could not finish — still on 13.5, nothing lost"). If even that fails,
+the bottom row says to reinstall from the releases page — your holdings are
+never touched, and a copy of the old code is in `~/.portfolio-widget/backups/`.
+
 ## Privacy
 
 - Everything stays on your Mac: your holdings in `positions.json`, the value
@@ -553,7 +679,9 @@ keep working.
   each close (not again at night or at weekends); earnings and dividends once
   a day, at most 20 holdings per refresh (new holdings at once — with 40+
   holdings the daily check spreads over a few refreshes); the long history
-  once after install. A refresh comes every 4½ minutes while a market you
+  once after install, two downloads at a time, once the first prices are a
+  minute or two old (if Yahoo says "too many requests" it stops and
+  fetches the rest about 30 minutes later). A refresh comes every 4½ minutes while a market you
   hold or watch is open, every 15 minutes around the US session (pre-market
   and after-hours), and every 30 minutes when all are closed — never later
   than the next open. A crypto or currency you hold or watch counts as always
@@ -581,8 +709,8 @@ In `positions.json`, under `"_settings"`. Every key is optional — leave one
 out for its default. You rarely need the file: the **where** column says
 where each one is set in the widget. ⚙ → Portfolio holds the ones every
 window shares, the graph's buttons and the title set a few more, and ⚙ →
-This window holds each window's name, size and zoom. Only `targets` (and the
-old `position` / `scale`) are set in the file alone.
+This window holds each window's name, size and zoom. Only the old
+`position` / `scale` are set in the file alone.
 
 | key | default | what it does | where to change it |
 |---|---|---|---|
@@ -590,6 +718,7 @@ old `position` / `scale`) are set in the file alone.
 | `currency` | `"auto"` | the currency everything is shown in | ⚙ → Portfolio → currency |
 | `cash` | none | money not invested, per currency — counted in the total; stored as `_cash` next to `_settings` | ⚙ → Portfolio → cash on hand |
 | `invested` | none | everything paid in so far — the header's profit can be shown against it; stored as `_invested` | ⚙ → Portfolio → money put in so far |
+| `goal` | none | an amount to reach by a date: `{"value": 250000, "date": "2035-12-31", "cur": "CAD"}` — the header's goal line | ⚙ → Portfolio → a goal to reach |
 | `backtestYears` | `5` | how far back the price history goes: `3`, `5`, `10` or `"max"` | ⚙ → Portfolio → history |
 | `benchmark` | `"auto"` | the index on the graph | ⚙ → Portfolio → compare with an index, or **index: … ▾** under the graph |
 | `showBenchmark` | `true` | the index line shown | **hide** / **show index** under the graph |
@@ -599,8 +728,8 @@ old `position` / `scale`) are set in the file alone.
 | `alerts` | `false` | a notification when a holding or the portfolio moves a lot in a day | ⚙ → Portfolio → big-move alerts |
 | `alertThreshold` | `5` | the daily move (%) of one holding that alerts | ⚙ → Portfolio, once alerts are on |
 | `portfolioAlertThreshold` | `2.5` | the daily move (%) of the whole portfolio that alerts | ⚙ → Portfolio, once alerts are on |
-| `targets` | none | your target mix, for drift and rebalancing | the file only |
-| `rebalanceWhole` | automatic | rebalance in whole shares (`true`) or fractional (`false`) | ⚙ → Portfolio → rebalancing suggests, once targets are set |
+| `targets` | none | your target mix, for the off-target badges and rebalancing | ⚙ → Portfolio → target mix |
+| `rebalanceWhole` | automatic | rebalance in whole shares (`true`) or fractional (`false`) | ⚙ → Portfolio → rebalancing suggests, once a target mix is set |
 | `display` | none | your windows and what each shows, incl. a window's news page options (`news`) | ⚙ → This window and What it shows |
 | `position`, `scale` | none | the single window's spot and zoom from before windows existed | the file only (from before windows) |
 | `theme` | `"dark"` | the look: `"dark"`, `"light"` or `"auto"` (follows the Mac's appearance) | ⚙ → Portfolio → look |
@@ -623,10 +752,10 @@ For example:
 ```
 
 Next to `_settings` the file can also hold `_invested` and `_cash` (both can
-be set in the widget, see above), `_watch` (see *The positions.json format*),
-`_alerts` (below) and `_realized` (written when you sell). Other keys
-starting with `_` are ignored, so `"_note": "…"` is a safe place for a
-comment.
+be set in the widget, see above), `_watch` and `_notes` (see *The
+positions.json format*), `_alerts` (below) and `_realized` (written when you
+sell). Other keys starting with `_` are ignored, so `"_comment": "…"` is a
+safe place for a comment.
 
 In detail:
 
@@ -647,6 +776,11 @@ In detail:
   currency. Easiest: click "index: … ▾" under the graph and pick from popular
   index funds (SPY, QQQ, VTI, DIA, IWM, VT, ACWI, EFA, EEM, XIU.TO, XIC.TO,
   VFV.TO, XEQT.TO, EXW1.DE, IWDA.AS, ISF.L) or type any symbol.
+- `goal`: set in ⚙ → Portfolio → a goal to reach (see *Returns and risk*).
+  From Terminal: `python3 set_setting.py goal 'CAD 250000 2035'` — a
+  currency, an amount (`250000`, `250 000` or `250,000`) and a year (meaning
+  Dec 31) or a day like `2035-06-30`; the date must be after today and within
+  60 years. `goal default` removes it.
 - `targets` / `rebalanceWhole`: your target mix (see *Targets and
   rebalancing*) and whether the rebalance panel suggests whole shares (`true`)
   or fractional (`false`; unset = whole shares when all your holdings are).
@@ -678,7 +812,8 @@ In detail:
 
 From Terminal, in the widget folder, `python3 set_setting.py KEY VALUE` sets
 any of these the way the widget does (`default` removes one, e.g.
-`python3 set_setting.py opacity 70%` or `python3 set_setting.py cash 'CAD 1200'`).
+`python3 set_setting.py opacity 70%` or `python3 set_setting.py cash 'CAD 1200'`),
+and `python3 set_setting.py undo` puts the last change back, like **undo** in ⚙.
 
 **Price alerts** live next to `_settings` in a `_alerts` list — separate from
 the daily-move `alerts` above, and on whenever the list has entries:
@@ -738,6 +873,13 @@ Add a cost and date to get P&L, and several lots if you bought in stages:
   is `{"USD": 1200, "CAD": 300}`, added to the total.
 - `_watch` (optional): `["AMD", "SHOP.TO", "BTC-USD"]` — tickers to monitor
   without holding them.
+- `_notes` (optional): a note and a price target per stock, set in its
+  detail view (see *Notes and price targets*):
+  `{"KO": {"note": "bought after the Q3 call", "target": 72.0, "side": "above", "at": "2026-10-21"}}`.
+  `target` is in the stock's own currency (pence for `.L`), `side` says
+  whether it was above or below the price when saved, `at` is the day it was
+  written; only the fields that are set are stored. At most 500 stocks, a
+  note at most 200 characters.
 - `_settings`, `_alerts`, `_realized`: see *Settings* and *Adding and
   selling stocks*.
 
@@ -751,6 +893,9 @@ python3 add_position.py MSFT --amount 1000
 python3 remove_position.py MSFT 5 --price 190
 python3 remove_position.py --reset-all      # start over (backup kept; keeps your settings and cash)
 python3 watchlist.py add AMD                # monitor without holding
+python3 holding_meta.py note KO bought after the Q3 call   # a note (13.6)
+python3 holding_meta.py target KO 72        # a price target; "clear" removes it
+python3 holding_meta.py list                # every note and price target
 python3 ticker_lookup.py look AMD           # detail + chart data as JSON
 python3 import_positions.py --file ~/Downloads/holdings.csv            # import preview
 python3 import_positions.py --file ~/Downloads/holdings.csv --commit   # import for real
@@ -769,7 +914,8 @@ writes it; you rarely need to touch it. Its shape:
   "news": {"scope": "all", "per": 5}}]}
 ```
 
-1–8 windows; the feature ids are listed in `display_prefs.py`; a window's
+1–8 windows; the feature ids are the `id`s in `FEATURES` near the top of
+`index.jsx` (13.6 adds `header.goal` and `panel.currencies`); a window's
 `news` object holds its news page options (see *News page* — leave it out for
 the plain news panel). Remove `display` to get the default single widget
 back, or in Terminal (in the widget folder) run
@@ -838,10 +984,33 @@ Find what you see, then do what it says.
   one (ticker, then `all`).
 - **No alert notifications**: allow Script Editor in System Settings →
   Notifications.
+- **I changed a setting by mistake**: open ⚙ within 3 minutes and click
+  **undo: …** in its header; it puts that one setting back (up to 5 changes
+  from the last day, one at a time). Later than that, `python3 set_setting.py
+  undo` in Terminal (in the widget folder) does the same, or copy the newest
+  `positions.backup-…-setting.json` over `positions.json`.
+- **Undo says "… was changed again since — nothing undone"**: that setting was
+  changed once more after the change you wanted to undo, so the widget leaves
+  it alone. Set it by hand in ⚙.
+- **The currencies panel doesn't show**: it appears only when you hold
+  something (or have cash) outside your display currency, and only in windows
+  that have it ticked in ⚙ → What it shows → **currencies** ("(everything is
+  in one currency)" there means there is nothing to show).
+- **"since you bought: … currency moves —"**: the widget needs a purchase date
+  and a purchase price on every holding in that currency; hover the currency
+  for the reason. Right after install it can also mean the older
+  exchange rates are still loading.
+- **The goal line shows no "on track" or "short"**: that needs a year of
+  history; hover the line for when it will appear.
+- **"by year" says received dividends need purchase dates**: add the date you
+  bought each holding (in the + form's **bought on**, or `purchaseDate` in
+  the file).
 - **"update failed: …"** in the bottom row: the download or the swap did not
-  work; nothing of yours changed. Run `bash update.sh` in the widget folder
-  (Terminal) for the full message, or install the release by hand (see
-  *Updating*). A rollback copy of the previous code sits in
+  work; nothing of yours changed, and a half-done update puts the old files
+  back by itself. Run `bash update.sh` in the widget folder (Terminal) for
+  the full message, or install the release by hand (see *Updating*) — when it
+  says "the update stopped half-way — reinstall from the releases page", do
+  that. A rollback copy of the previous code sits in
   `~/.portfolio-widget/backups/`.
 
 ## Files
@@ -852,13 +1021,14 @@ Find what you see, then do what it says.
 | `widget_command.sh` | what Übersicht runs every 5 seconds; starts refreshes, finds Python, runs the setup button |
 | `portfolio_tracker.py` | fetches prices and computes everything (needs yfinance) |
 | `ticker_lookup.py` | stock search and lookups for the + form (needs yfinance) |
-| `add_position.py`, `remove_position.py`, `watchlist.py`, `portfolio_file.py` | buy/sell/watch helpers (standard library only); selling records the gain in `_realized` |
-| `export.py` | writes the three CSV files (`export` in the footer) |
+| `add_position.py`, `remove_position.py`, `watchlist.py`, `portfolio_file.py` | buy/sell/watch helpers (standard library only); selling records the gain in `_realized`; `portfolio_file.py` also keeps the settings backups and the undo list (`.cache/setting_undo.json`) |
+| `export.py` | writes the four CSV files (`export` in the footer) |
 | `menubar.sh` | optional SwiftBar / xbar menu bar summary (reads the last refresh only) |
 | `rebalance.py` | the rebalance maths (targets, drift, fewest-dollar trades) |
 | `alerts.py` | add, remove and list price alerts (`_alerts`) |
+| `holding_meta.py` | a note and a price target per stock (`_notes`), from a stock's detail view; standard library only, no network |
 | `display_prefs.py` | checks the `display` setting (windows, features, sizes) |
-| `set_setting.py` | saves what you click in the widget (index, ⤢, one line, news, windows, cash, money put in…) into `positions.json` |
+| `set_setting.py` | saves what you click in the widget (index, ⤢, one line, news, windows, cash, money put in, target mix, goal…) into `positions.json`, with a backup first; `undo` puts the last change back |
 | `import_positions.py` | adds many holdings at once from a pasted list or a CSV file (**+ → import a list…**) |
 | `update.sh` | installs the newest release from GitHub, keeping your data (**update … ▸** in the bottom row) |
 | `positions.example.json` | the demo portfolio; copied to `positions.json` on first run |

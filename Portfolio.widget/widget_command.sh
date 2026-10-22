@@ -24,6 +24,9 @@
 #   widget_command.sh alert add TICKER KIND VALUE  -> price alert (JSON only);
 #                     alert remove ID | alert list    KIND above|below|
 #                                                     pctFromCost|drawdownPct
+#   widget_command.sh meta note TICKER TEXT...     -> note / price target (13.6,
+#                     meta target TICKER PRICE [above|below]   JSON only);
+#                     meta clear TICKER | meta list [TICKER]
 #   widget_command.sh news TICKER                  -> JSON headlines (only with
 #                                                     _settings.news true)
 #   widget_command.sh export -> CSVs in ~/Documents/Portfolio (JSON)
@@ -65,6 +68,10 @@ HISTORY_RETRY_AFTER=1800  # ... and retried this long after it failed
 HISTORY_REPEAT_AFTER=600  # ... and run again this long after it WORKED, unless
                           # the plan asks for something else (no refresh ->
                           # plan -> job -> refresh loop can hammer Yahoo)
+HISTORY_MIN_CACHE_AGE=120  # ... and only once data.json is this old (the first refresh's burst never overlaps it)
+if [[ "${PORTFOLIO_HISTORY_MIN_AGE:-}" =~ ^[0-9]{1,6}$ ]]; then   # tests: 0
+  HISTORY_MIN_CACHE_AGE=$((10#$PORTFOLIO_HISTORY_MIN_AGE))
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRACKER="$SCRIPT_DIR/portfolio_tracker.py"
@@ -204,7 +211,10 @@ case "$1" in
     # currency, backtestYears, alerts, alertThreshold,
     # portfolioAlertThreshold; "default" removes a key), and cash and
     # invested (13.5: _cash / _invested next to _settings; both ask for a
-    # refresh). The value is ONE
+    # refresh), and undo [ID] (13.6: put back the last settings change;
+    # "$3" is the id or empty), and targets (13.6: the target mix as JSON,
+    # asks for a refresh), and goal (13.6: 'CAD 250000 2035' or default;
+    # no refresh, the widget works out the progress). The value is ONE
     # argument ($3): spaces are allowed ("setting title 'My money'"), and
     # the "--" keeps a negative number like a position -120,40 or a title
     # starting with "-" a value, not an option. A benchmark, currency or
@@ -233,6 +243,16 @@ case "$1" in
     PY=$(find_python any) || { echo '{"error": "no python3 found"}'; exit 0; }
     out=$("$PY" "$SCRIPT_DIR/alerts.py" --json --positions "$POSITIONS" -- "${@:2}" 2>/dev/null)
     [ -n "$out" ] || out='{"error": "could not save the alert"}'
+    printf '%s\n' "$out"
+    exit 0
+    ;;
+  meta)
+    # notes and price targets in _notes (holding_meta.py): standard library
+    # only, JSON on stdout and nothing else. "--": a note starting with "-"
+    # stays text. No refresh: no prices change, data.json is patched in place
+    PY=$(find_python any) || { echo '{"error": "no python3 found"}'; exit 0; }
+    out=$("$PY" "$SCRIPT_DIR/holding_meta.py" --json --positions "$POSITIONS" -- "${@:2}" 2>/dev/null)
+    [ -n "$out" ] || out='{"error": "could not save the note"}'
     printf '%s\n' "$out"
     exit 0
     ;;
@@ -481,6 +501,10 @@ if [[ "$refresh_after" =~ ^[0-9]{2,4}$ ]] && [ "$((10#$refresh_after))" -ge 60 ]
    [ "$((10#$refresh_after))" -le 3600 ]; then
   max_age=$((10#$refresh_after))
 fi
+# the history job's gap after a refresh: never more than half the wait,
+# so a short refresh_after cannot starve it
+hist_min_age=$HISTORY_MIN_CACHE_AGE
+[ $((max_age/2)) -lt "$hist_min_age" ] && hist_min_age=$((max_age/2))
 
 want_fetch=false
 [ "$age" -ge "$max_age" ] && [ "$fail_age" -ge "$fail_wait" ] && want_fetch=true
@@ -499,7 +523,7 @@ fi
 hist_running=false
 is_history_running && hist_running=true
 if [ "$hist_running" = false ] && [ "$running" = false ] && [ -s "$HIST_NEEDED" ] && \
-   [ -s "$CACHE_FILE" ] && [ ! -s "$FAIL_FILE" ] && \
+   [ -s "$CACHE_FILE" ] && [ ! -s "$FAIL_FILE" ] && [ "$age" -ge "$hist_min_age" ] && \
    [ "$(file_age_seconds "$HIST_FAIL")" -ge "$HISTORY_RETRY_AFTER" ] && \
    { [ "$(file_age_seconds "$HIST_DONE")" -ge "$HISTORY_REPEAT_AFTER" ] || \
      [ "$(plan_signature)" != "$(cat "$HIST_DONE" 2>/dev/null)" ]; }; then

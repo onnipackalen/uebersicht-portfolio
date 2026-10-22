@@ -1,5 +1,107 @@
 # Changelog
 
+## 13.6
+
+- **Undo the last settings change**: after a change in ⚙ the header shows
+  **undo: <what you changed>** (for example "undo: the widget's size") for
+  3 minutes. A click puts back only that setting, so a buy, sale or alert
+  made since stays. It goes back one change at a time, newest first, up to
+  5 changes from the last day; quick repeated changes to the same setting
+  within 10 seconds (a drag, the background slider) count as one. In a
+  narrow window the chip sits on its own line. Every settings change also
+  first saves a copy of the file (`positions.backup-…-setting.json`, the
+  newest 10 kept). `set_setting.py undo` / `widget_command.sh setting
+  undo`; the list lives in `.cache/setting_undo.json`, and undo skips
+  damaged entries and only ever touches settings.
+- **Edit the target mix in ⚙ instead of the positions file**: ⚙ →
+  Portfolio → **target mix** → **set one** or **start from today's mix**,
+  then type a % per sector, or split a sector **by holding**, plus cash.
+  The total line says "adds up to 100 % ✓", "7 % left to place" or "3 %
+  too much — lower a row"; Return or **save target mix** saves, **use
+  today's mix** refills it, **remove target mix** asks first. A mix you
+  are typing stays when ⚙ closes (Esc too) until you save or remove it.
+  Clicking the rebalancing panel's title opens this row. `set_setting.py
+  targets '{"Staples": 40, "KO": 10, "cash": 5}'` / `targets default`;
+  saved where 13.5 already read it (`_settings.targets`), names checked
+  against your holdings, sectors and cash; **reset portfolio settings**
+  keeps it.
+- **A note and a price target per stock**: open a stock and click **add a
+  note** (a line for yourself, up to 200 characters) or **set a price
+  target**. The target row shows how far away the price is ("72.00 USD ·
+  8.2% away") and turns amber once **reached**; **alert me** turns it into
+  a Mac notification. A ✎ after the bell in the list marks the stocks that
+  have one, and its hover shows both. Stored as `_notes` in positions.json
+  (13.5 ignores it); selling everything keeps the note, **start fresh**
+  drops it. New `holding_meta.py` (`widget_command.sh meta note | target |
+  clear | list`).
+- **Currencies panel** (⚙ → what it shows → **currencies**): how much of
+  the portfolio sits in each currency (cash included), today's change split
+  into share prices and currency moves, and your gain since you bought
+  split the same way — the currency part counted per purchase at that
+  day's exchange rate (the P&L in the header stays at today's rate). It
+  appears only when you hold something outside your display currency.
+  Hover a currency for today's rate and the average rate you bought at; when
+  the currency part cannot be known (a holding without a purchase date or
+  price, rates still loading) the hover says why. data.json `currencies`.
+- **Income panel: next dates and by year** — a switch under the yield line:
+  **12 months** (the bars, as before) | **next dates** (your holdings'
+  ex-dividend dates in the next 90 days; "expected" = not announced yet,
+  about a year after last year's payment; "paid <date>" once the company
+  announces it) | **by year** (what your shares earned in each calendar
+  year, by ex-dividend date, at today's exchange rate). The export writes a
+  4th file, **dividends.csv**: every dividend your shares earned, by
+  ex-date (holdings you own now, dated purchases and recorded sales), at
+  today's exchange rate.
+- **A goal** (⚙ → Portfolio → **a goal to reach**): an amount and a year or
+  a date, like `CAD 250000 2035`. The header gets a line "goal $250,000 by
+  2035 · 40%" with a small bar, and after a year of history **on track** or
+  "29% short at your pace so far" (also **reached** and **date passed**).
+  The hover shows the arithmetic: the holdings grow at your annual return
+  so far, cash stays as it is — not a forecast. Switch the line in ⚙ →
+  what it shows → **goal**. `set_setting.py goal 'CAD 250000 2035'` /
+  `goal default` (`_settings.goal`; asks for no refresh; **reset portfolio
+  settings** keeps it). Saving it again keeps the goal's own currency.
+- **Polish**: the import preview has a header line (stock · shares · price
+  · date · note), marks only the ticker of a row it could not read, and fits
+  narrow windows; the ⚙ find box also knows the news options ("since",
+  "muted", "per stock", "CNBC", "keyword"…) and the group hints ("drag",
+  "resize"), and "nothing matches" suggests words to try. In windows under
+  400 px the graph's date box hides, the change figure and ⤢ move to the
+  end of the tabs line, the editor title is just "⚙ Settings" and long
+  chip rows put their label on its own line. The sectors title never wraps
+  (it shortens to "sectors · trend · day · vol"); in the heat map two or
+  more tiles too thin for a ticker merge into one "+3" tile that lists them
+  on hover, and a wide but short tile shows ticker and change on one row.
+  Removing a cash amount asks first ("remove CAD 1,200?"). The index
+  caption's hover says where to change the index (⚙ → Portfolio → compare
+  with an index). The demo wording counts the demo ("remove the 22 demo
+  holdings?"), the messages after a buy, sale or import are plainer, and
+  the page dots and ⌖ say how to stay on a page or let them turn.
+- **Safer updates**: the update now prepares all new files first and swaps
+  them in together; if anything fails it puts the old files back by itself
+  ("the update could not finish — still on 13.5, nothing lost"). If even
+  that fails, reinstall from the releases page — your holdings are never
+  touched, and a copy of the old code is in `~/.portfolio-widget/backups`.
+- **Gentler first history download**: 2 downloads at a time, at least half
+  a second apart, and only once the first prices are in (data.json at least
+  2 minutes old). If Yahoo says "too many requests" the job stops, keeps
+  what it got and fetches the rest 30 minutes later
+  (`PORTFOLIO_HISTORY_GAP`, `PORTFOLIO_HISTORY_MIN_AGE`).
+- **Small fixes**: money put in that rounds to 0 (like 0.001) is refused
+  instead of saved as 0; an import file with an unclosed quote gives a
+  plain message instead of a crash; only a pair with a known quote currency
+  (`BTC-USD`) counts as crypto, so a ticker with a dash (a preferred share)
+  keeps market hours instead of refreshing all night.
+- Tests: `run_all.py` now starts its own demo servers (an example and a
+  news demo, even ports 41540–41598) and finds Übersicht by itself
+  (`NEWSPAGE_*` and `UEBERSICHT_RESOURCES` still override), prints every
+  SKIP with its reason (`--strict` fails on any, `--no-demo-server`); new
+  sections `features136` and `safety136` (alerts notify once, menu-bar
+  edge cases, start fresh end to end) and the opt-in `release` (zip file
+  set, modes, VERSION vs this file, a clean install under a bare PATH),
+  which `build_release.sh` runs after the privacy scan — a failure deletes
+  the zip.
+
 ## 13.5
 
 - **The ⚙ gear is always faintly visible**: it rests at 35 % and brightens

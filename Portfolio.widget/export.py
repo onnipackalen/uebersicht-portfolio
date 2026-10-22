@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-export.py — the portfolio as three CSV files for Numbers / Excel / a script
+export.py — the portfolio as four CSV files for Numbers / Excel / a script
 (widget_command.sh export runs this for the widget's footer "export" link).
 
     python3 export.py                      # -> ~/Documents/Portfolio/
@@ -15,6 +15,10 @@ Output folder: --out, else $PORTFOLIO_EXPORT_DIR, else ~/Documents/Portfolio
   daily_values.csv  the full day-by-day table (.cache/daily_all.json): value,
                     money in, gain, index close
   sales.csv         the sales recorded in _realized (header only without any)
+  dividends.csv     every dividend your shares earned, by ex-date, from the
+                    cached payment history: holdings you own now, dated
+                    purchases and recorded sales only; amounts at today's
+                    exchange rate (header only without any)
 
 UTF-8 with a byte-order mark, comma separated, CRLF line ends, a header row,
 ISO dates (YYYY-MM-DD), plain numbers ("." decimals, no currency signs or
@@ -24,7 +28,7 @@ at today's rate. Text starting with = + - @ gets a leading ' so a
 spreadsheet never runs it as a formula.
 
 Reads positions.json and the widget's last refresh (.cache/data.json,
-daily_all.json, derived_basis.json); no network, writes nothing into the
+daily_all.json, derived_basis.json, ticker_meta.json); no network, writes nothing into the
 widget folder. Prints one line of JSON and nothing else:
 {"ok": true, "dir", "dirShown", "path", "files", "rows", "currency"} or
 {"error": "..."} (exit 1). Standard library only, so any python3 can run it.
@@ -37,11 +41,12 @@ import json
 import math
 import os
 import sys
+from datetime import datetime
 
 import portfolio_file as pf
 import portfolio_tracker as pt
 
-FILES = ("holdings.csv", "daily_values.csv", "sales.csv")
+FILES = ("holdings.csv", "daily_values.csv", "sales.csv", "dividends.csv")
 HOLDINGS_HEADER = ["ticker", "name", "theme", "purchase_date", "shares", "cost_per_share",
                    "cost_total", "cost_source", "currency", "price", "value", "fx_rate",
                    "home_currency", "value_home", "cost_home", "gain_home", "gain_pct"]
@@ -50,6 +55,8 @@ DAILY_HEADER = ["date", "value", "money_in", "gain", "source", "index_close",
 SALES_HEADER = ["date", "ticker", "shares", "price", "currency", "proceeds", "cost", "gain",
                 "fx_rate", "home_currency", "proceeds_home", "cost_home", "gain_home",
                 "purchase_dates"]
+DIVIDENDS_HEADER = ["ex_date", "ticker", "per_share", "shares_held", "amount", "currency",
+                    "fx_rate", "home_currency", "amount_home"]
 # decimals per kind of number
 DP_SHARES, DP_COST, DP_PRICE, DP_FX, DP_MONEY, DP_PCT, DP_INDEX = 6, 6, 4, 6, 2, 2, 4
 PRIVACY_HINT = ("allow Übersicht to use the Documents folder (System Settings "
@@ -252,6 +259,40 @@ def sales_rows(raw, home):
     return out
 
 
+def dividend_rows(path, raw, positions, data, home):
+    """Every dividend the shares earned (pt.divs_paid: the payments behind
+    the widget's "received" total), by ex-date then ticker; holdings owned
+    now only, amounts at today's rate (data.json's fxRate)."""
+    meta = pt.read_json(os.path.join(pf.cache_dir(path), "ticker_meta.json"), {})
+    if not isinstance(meta, dict):
+        meta = {}
+    today = datetime.now(pt.MARKET_TZ).strftime("%Y-%m-%d")
+    sold = pt.sold_slices(pt.load_realized(raw))
+    rows_by_tk = {}
+    for p in data.get("positions") or []:
+        if isinstance(p, dict) and isinstance(p.get("ticker"), str) and not p.get("watch"):
+            rows_by_tk.setdefault(p["ticker"], p)
+    out = []
+    for tk in sorted(positions):
+        m = meta.get(tk)
+        divs = pt.clean_divs(m.get("divs")) if isinstance(m, dict) else None
+        if not divs:
+            continue
+        entry, drow = positions[tk], rows_by_tk.get(tk, {})
+        cur = drow.get("currency")
+        if not (isinstance(cur, str) and cur):
+            cur = entry.get("currency") if isinstance(entry.get("currency"), str) \
+                and entry.get("currency").strip() else pt.infer_currency(tk)
+        cur = cur.strip()
+        fx = fnum(drow.get("fxRate"))
+        for d, a, sh in pt.divs_paid(divs, entry["lots"], today, sold.get(tk, ())):
+            out.append([d, text(tk), num(a, DP_COST), num(sh, DP_SHARES),
+                        num(a * sh, DP_MONEY), text(cur), num(fx, DP_FX), text(home),
+                        num(mul(a * sh, fx), DP_MONEY)])
+    out.sort(key=lambda r: (r[0], r[1]))
+    return out
+
+
 def write_csv(folder, name, header, rows):
     """<name>.tmp, then an atomic replace: a reader never sees half a file."""
     final = os.path.join(folder, name)
@@ -280,7 +321,7 @@ class JsonArgs(argparse.ArgumentParser):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    ap = JsonArgs(description="Write holdings, daily values and sales as CSV files.")
+    ap = JsonArgs(description="Write holdings, daily values, sales and dividends as CSV files.")
     ap.add_argument("--positions", default=os.path.join(here, "positions.json"))
     ap.add_argument("--out", default=None,
                     help="output folder (default: $PORTFOLIO_EXPORT_DIR, else "
@@ -303,13 +344,14 @@ def main():
     home = home_currency(raw, data)
     tables = (holdings_rows(path, positions, cash, data, home),
               daily_rows(path, data, home),
-              sales_rows(raw, home))
+              sales_rows(raw, home),
+              dividend_rows(path, raw, positions, data, home))
 
     folder = out_dir(args.out)
     try:
         os.makedirs(folder, exist_ok=True)
-        for name, header, rows in zip(FILES, (HOLDINGS_HEADER, DAILY_HEADER, SALES_HEADER),
-                                      tables):
+        for name, header, rows in zip(FILES, (HOLDINGS_HEADER, DAILY_HEADER, SALES_HEADER,
+                                              DIVIDENDS_HEADER), tables):
             write_csv(folder, name, header, rows)
     except OSError as e:
         msg = "[Errno %d] %s" % (e.errno, e.strerror) if e.errno and e.strerror else str(e)
@@ -321,7 +363,7 @@ def main():
     reply({"ok": True, "dir": folder, "dirShown": tilde(folder),
            "path": os.path.join(folder, FILES[0]), "files": list(FILES),
            "rows": {"holdings": len(tables[0]), "daily": len(tables[1]),
-                    "sales": len(tables[2])},
+                    "sales": len(tables[2]), "dividends": len(tables[3])},
            "currency": home})
 
 

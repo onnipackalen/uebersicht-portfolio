@@ -421,7 +421,13 @@ def sniff(text):
         if len(with_d) >= 2 and len(with_d) >= 0.6 * len(lines):
             found.append((-sum(with_d) / len(with_d), order, d))
     found.sort()
-    return [(d, list(csv.reader(io.StringIO(text), delimiter=d))) for _, _, d in found]
+    out = []
+    for _, _, d in found:
+        try:   # a delimiter the csv module trips over (an unclosed quote) is dropped
+            out.append((d, list(csv.reader(io.StringIO(text), delimiter=d))))
+        except csv.Error:
+            continue
+    return out
 
 
 def header_roles(c):
@@ -639,7 +645,7 @@ def main():
             reply({"error": "the file is larger than 2 MB"}, 1)
         # UTF-16 only with a byte-order mark or many NUL bytes: an even-length
         # Windows (cp1252) file also "decodes" as UTF-16, into nonsense
-        if data[:2] in (b"\xff\xfe", b"\xfe\xff") or data.count(b"\x00") >= len(data) // 5:
+        if data[:2] in (b"\xff\xfe", b"\xfe\xff") or data.count(b"\x00") >= max(1, len(data) // 5):
             encodings = ("utf-16", "utf-8-sig", "cp1252", "latin-1")
         else:
             encodings = ("utf-8-sig", "cp1252", "latin-1")
@@ -654,7 +660,10 @@ def main():
             reply({"error": "the file is not text"}, 1)
     if len(text) > MAX_TEXT:
         reply({"error": "the list is too long (2 MB at most)"}, 1)
-    rows, fmt, cols = parse_text(text)
+    try:
+        rows, fmt, cols = parse_text(text)
+    except csv.Error:
+        reply({"error": "the file has a line the widget cannot read (an unclosed quote?)"}, 1)
     if len(rows) > MAX_ROWS:
         for r in rows[MAX_ROWS:]:
             r["ok"] = False

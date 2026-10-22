@@ -7,14 +7,31 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
+from datetime import datetime
 
 from portfolio_tracker import infer_currency, split_currency
 
 # Yahoo symbols: MSFT, BRK-B, SHOP.TO, 0700.HK, M&M.NS, BTC-USD, GC=F, ^GSPC
 TICKER_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# 13.6: a copy of positions.json before every settings write (set_setting.py
+# and any other settings writer), next to it, at most one per
+# SETTING_BACKUP_GAP seconds, the newest SETTING_BACKUP_KEEP kept. The
+# -import, -daily and plain backups have their own names and rotation.
+SETTING_BACKUP_KEEP = 10
+SETTING_BACKUP_GAP = 10            # seconds
+SETTING_BACKUP_RE = re.compile(r"^positions\.backup-(\d{8}-\d{6})-setting\.json$")
+# 13.6: "undo last change" in ⚙ — a short stack of what each settings write
+# changed (before/after per key), in .cache, never in positions.json, so the
+# file's shape stays the same and a downgrade is safe
+UNDO_FILE = "setting_undo.json"    # in cache_dir(path)
+UNDO_KEEP = 5
+UNDO_MAX_AGE = 86400
+UNDO_MERGE_S = 10
 
 
 def fail(msg):
@@ -127,6 +144,156 @@ def request_refresh(path):
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "refresh.request"), "w") as f:
         f.write("%d\n" % time.time())
+
+
+def setting_backup(path, now=None):
+    """13.6: copy positions.json to positions.backup-YYYYMMDD-HHMMSS-setting.json
+    before a settings write; returns the name, or None (no file, one made
+    under SETTING_BACKUP_GAP seconds ago — its age read from the stamp in
+    its name, never the mtime — the name taken, or any error). Keeps the
+    newest SETTING_BACKUP_KEEP. Never raises; never touches other backups."""
+    try:
+        now = time.time() if now is None else now
+        if not os.path.exists(path):
+            return None
+        folder = os.path.dirname(os.path.abspath(path))
+        names = sorted(n for n in os.listdir(folder) if SETTING_BACKUP_RE.match(n))
+        if names:
+            stamp = SETTING_BACKUP_RE.match(names[-1]).group(1)
+            t = time.mktime(datetime.strptime(stamp, "%Y%m%d-%H%M%S").timetuple())
+            if 0 <= now - t < SETTING_BACKUP_GAP:
+                return None
+        name = "positions.backup-%s-setting.json" % datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S")
+        dest = os.path.join(folder, name)
+        if os.path.exists(dest):
+            return None
+        shutil.copyfile(path, dest + ".tmp")
+        os.replace(dest + ".tmp", dest)
+        names = sorted(set(names) | {name})
+        for old in names[:-SETTING_BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(folder, old))
+            except OSError:
+                pass
+        return name
+    except Exception:
+        return None
+
+
+def section(raw, spot):
+    """Where an undo record's names live: "_settings" (a dict, else {}) or
+    "" (the top of positions.json, e.g. _cash / _invested)."""
+    if spot == "_settings":
+        s = raw.get("_settings")
+        return s if isinstance(s, dict) else {}
+    return raw
+
+
+def snap(container, names):
+    """A deep copy of container's names that are there (absent = not in it)."""
+    return {n: json.loads(json.dumps(container[n])) for n in names if n in container}
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _jsame(a, b):
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def undo_records(path, now=None):
+    """13.6: the undo stack in .cache/setting_undo.json, oldest first: only
+    well-formed records changed in the last UNDO_MAX_AGE seconds. A bad or
+    missing file gives []. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        with open(os.path.join(cache_dir(path), UNDO_FILE)) as f:
+            recs = json.load(f)
+        if not isinstance(recs, list):
+            return []
+        out = []
+        for r in recs:
+            if not isinstance(r, dict):
+                continue
+            if not (isinstance(r.get("id"), int) and not isinstance(r.get("id"), bool)
+                    and _num(r.get("t")) and _num(r.get("t1"))):
+                continue
+            if not all(isinstance(r.get(k), str) for k in ("key", "kind", "label", "spot")):
+                continue
+            if not (isinstance(r.get("names"), list) and isinstance(r.get("before"), dict)
+                    and isinstance(r.get("after"), dict)):
+                continue
+            if abs(now - r["t1"]) <= UNDO_MAX_AGE:
+                r["label"] = r["label"][:80]     # (as the widget shows it)
+                out.append(r)
+        return out
+    except Exception:
+        return []
+
+
+def undo_summary(rec):
+    """What the widget shows for a record: {"id", "key", "label", "t"}."""
+    if not isinstance(rec, dict):
+        return None
+    return {"id": rec.get("id"), "key": rec.get("key"), "label": rec.get("label"),
+            "t": rec.get("t")}
+
+
+def undo_push(path, key, label, spot, names, before, after, backup=None, kind="set", now=None):
+    """13.6: record one settings write (call it after pf.save). before /
+    after hold each name's value (absent = not in the file). Same-key
+    "set" changes within UNDO_MERGE_S seconds that chain on (the record's
+    after == this before) merge into one record: undo goes back to before
+    the drag or the slider, and a record back where it started is dropped.
+    Returns the newest record's summary, or None. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        recs = undo_records(path, now)
+        last = recs[-1] if recs else None
+        if (last is not None and last["key"] == key and last["kind"] == kind == "set"
+                and now - last["t1"] < UNDO_MERGE_S and _jsame(last["after"], before)):
+            if _jsame(after, last["before"]):
+                recs.pop()
+                undo_write(path, recs)
+                return None
+            last["after"] = json.loads(json.dumps(after))
+            last["t1"] = now
+            last["label"] = label
+            undo_write(path, recs)
+            return undo_summary(last)
+        if _jsame(before, after):
+            return None
+        rec = {"id": int(now * 1000), "t": now, "t1": now, "key": key, "kind": kind,
+               "label": label, "spot": spot, "names": list(names),
+               "before": json.loads(json.dumps(before)),
+               "after": json.loads(json.dumps(after)), "backup": backup}
+        recs.append(rec)
+        undo_write(path, recs)
+        return undo_summary(rec)
+    except Exception:
+        return None
+
+
+def undo_write(path, recs):
+    """Save the newest UNDO_KEEP records atomically ([] removes the file).
+    Best effort: errors are swallowed."""
+    target = os.path.join(cache_dir(path), UNDO_FILE)
+    try:
+        recs = list(recs)[-UNDO_KEEP:]
+        if not recs:
+            if os.path.exists(target):
+                os.remove(target)
+            return
+        os.makedirs(cache_dir(path), exist_ok=True)
+        with open(target + ".tmp", "w") as f:
+            json.dump(recs, f, allow_nan=False)
+        os.replace(target + ".tmp", target)
+    except Exception:
+        try:
+            os.remove(target + ".tmp")
+        except OSError:
+            pass
 
 
 def to_display(path, ticker, per_share, shares, rate=None):

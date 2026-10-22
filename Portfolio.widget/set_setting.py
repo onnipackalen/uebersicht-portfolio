@@ -45,6 +45,13 @@ and "portfolio reset-all", which drops every portfolio setting in one write)
                                                  # currency and an amount
     python3 set_setting.py cash 'CAD default'    # ... that currency's gone
     python3 set_setting.py invested 25000        # the money put in (13.5)
+    python3 set_setting.py targets '{"Tech": 30, "cash": 10}'
+                                                 # the target mix (13.6)
+    python3 set_setting.py targets default       # ... no target mix
+    python3 set_setting.py goal 'CAD 250000 2035'  # a goal (13.6): reach
+                                                 # this much by Dec 31 2035
+                                                 # (or a day: 2035-06-30)
+    python3 set_setting.py goal default          # ... no goal
 
 Only these keys, stored under "_settings": showBenchmark, graphBig, compact,
 news, rebalanceWhole and alerts as true / false, position as {"x": int,
@@ -60,7 +67,20 @@ line breaks; "" or "default" removes it), currency as a 3-letter code
 or "max" ("default" removes it), alertThreshold as a number 0.5-50 and
 portfolioAlertThreshold as 0.1-50 (2 decimals; "default" removes them),
 alerts and rebalanceWhole also take "default" (removed). Every key is
-optional in positions.json: an old file keeps working. What "default"
+optional in positions.json: an old file keeps working. targets (13.6,
+⚙ → Portfolio) is the target mix as a JSON object {name: 0-100}, stored
+as _settings.targets in the shape 13.5 already reads: a name is "cash"
+(any case, stored "cash"), a held ticker (stored as held) or a sector as
+data.json's themes spell it (any case; without a data.json yet a name is
+kept as typed); at most 80 names of 1-40 characters, no name twice (case
+ignored), and not a ticker together with its own sector; a number is
+stored whole or with 2 decimals; "", "default", "none" or {} removes it.
+"portfolio reset-all" leaves it. goal (13.6, ⚙ → Portfolio) is stored
+as _settings.goal {"value": amount, "date": "YYYY-MM-DD", "cur": CUR} (a
+year alone means Dec 31; the date must be after today and within 60
+years; cur is the currency the amount is in); "default" removes it, it
+asks for no refresh (the widget works out the progress itself) and
+"portfolio reset-all" leaves it. What "default"
 shows in data.json's "ui" is UI_DEFAULT below.
 Cash on hand and the money put in (13.5, ⚙ → Portfolio) are data, not
 settings: they are stored next to _settings, not in it, as "_cash"
@@ -72,7 +92,8 @@ currency; an amount of 0 removes it), 'CUR default' (removes it) or
 99,5 (0 to 1e12, 2 decimals). Both reply with the value as data.json's
 "ui" shows it: cash as the whole {CUR: amount} object ({} when none),
 invested as a number or null.
-A benchmark, currency or backtestYears change needs new data, so it also
+A benchmark, currency, backtestYears or targets change needs new data
+(REFRESH_KEYS; the rebalance plan comes from the tracker), so it also
 writes .cache/refresh.request (only when it changed): the widget's next
 refresh fetches it. So does a display change whose news page (13.1,
 display_prefs.news_plan) asks for headlines the tracker did not plan
@@ -81,6 +102,23 @@ entry — at most one such request per NEWS_REQUEST_GAP seconds (the mtime
 of .cache/news.request); per, sort, span, group, dense, sources, mute, q
 and removals never ask for one. A cash or invested change asks for one
 too (the totals and the returns use them). No other key asks for a refresh.
+13.6: before every write that changes something, positions.json is copied
+to positions.backup-YYYYMMDD-HHMMSS-setting.json next to it (at most one
+per 10 s, the newest 10 kept; the -import, -daily and plain backups are
+not touched), and what changed (each key's value before and after) goes
+on a short undo stack in .cache/setting_undo.json (5 records, 1 day;
+same-key changes within 10 s merge, so undo goes back to before a drag).
+A success reply then also has "undo": {"id", "key", "label", "t"}.
+
+    python3 set_setting.py undo                  # put back the last change
+    python3 set_setting.py undo 1792300000123    # ... only if it is still
+                                                 # that one (the reply's id)
+
+undo [ID] restores only the recorded keys (a buy or sale since stays). It
+refuses when the newest record is not ID, or when one of its keys changed
+since (that record is dropped). It replies {"ok": true, "key": "undo",
+"value": null, "undone": {"key", "label"}, "ui": {...}, "next": the next
+record or null}; the undo itself pushes no record (no redo).
 Prints one line of JSON and nothing else: {"ok": true, "key": ...,
 "value": ...} (the value as data.json's "ui" shows it) or {"error": "..."}
 with exit 1. Standard library only, so any python3 (3.9+) can run it.
@@ -95,6 +133,7 @@ import os
 import re
 import sys
 import time
+from datetime import date
 
 import display_prefs
 import portfolio_file as pf
@@ -108,7 +147,35 @@ KEYS = ("showBenchmark", "graphBig", "compact", "position", "scale", "news",
         # "portfolio reset-all" (every portfolio setting back to its default)
         "theme", "opacity", "updates", "welcome", "portfolio",
         # 13.5: cash on hand and the money put in (⚙ → Portfolio)
-        "cash", "invested")
+        "cash", "invested",
+        # 13.6: put back the last settings change (undo_last)
+        "undo",
+        # 13.6: the target mix (⚙ → Portfolio)
+        "targets",
+        # 13.6: the goal (⚙ → Portfolio)
+        "goal")
+# a change of these needs new data: .cache/refresh.request when it changed
+# (also for "portfolio reset-all", see main)
+# 13.6: "targets" too: the rebalance plan and the off-target figures are
+# worked out only by the tracker
+REFRESH_KEYS = ("benchmark", "currency", "backtestYears", "targets")
+# 13.6: what each key is called in "undo: ..." — the ⚙ row's label as a
+# noun phrase, so the terminal and the widget say the same words. Always
+# read with LABELS.get(key, key): a key without a label never raises
+LABELS = {"showBenchmark": "the index line", "graphBig": "the bigger graph",
+          "compact": "the one-line view", "position": "where the widget sits",
+          "scale": "the widget's size", "news": "headlines",
+          "rebalanceWhole": "how rebalancing rounds", "benchmark": "the index",
+          "display": "what a window shows", "title": "the portfolio name",
+          "currency": "the currency", "backtestYears": "the history length",
+          "alerts": "big-move alerts", "alertThreshold": "the alert level for a holding",
+          "portfolioAlertThreshold": "the alert level for the portfolio",
+          "theme": "the look", "opacity": "the background", "updates": "the update check",
+          "welcome": "the welcome card", "portfolio": "the portfolio settings",
+          "cash": "cash on hand", "invested": "money put in so far",
+          "targets": "the target mix", "goal": "the goal"}
+RESET_LABELS = {"display": "reset of all windows",
+                "portfolio": "reset of the portfolio settings"}
 # 13.5: keys stored at the top of positions.json, next to _settings (not in
 # it): they are data, not settings, so "portfolio reset-all" leaves them
 TOP_LEVEL = {"cash": "_cash", "invested": "_invested"}
@@ -123,6 +190,9 @@ X_RANGE = (-10000, 20000)      # screen pixels; the widget keeps 60 px on screen
 Y_RANGE = (0, 20000)           # never above the top: the header is the handle
 SCALE_RANGE = (0.6, 1.6)
 CURRENCY_RE = re.compile(r"^[a-z]{3}$")       # matched after lower-casing
+# the goal (13.6): a year (Dec 31) or a day, at most this many years ahead
+GOAL_YEARS_MAX = 60
+GOAL_DATE_RE = re.compile(r"^\d{4}(-\d{2}-\d{2})?$")
 BACKTEST_YEARS = {"3": 3, "5": 5, "10": 10, "max": "max"}
 # the two alert thresholds (% moves): (low, high) and the message's words
 THRESHOLD_RANGE = {"alertThreshold": (0.5, 50), "portfolioAlertThreshold": (0.1, 50)}
@@ -133,7 +203,7 @@ UI_DEFAULT = {"position": None, "scale": 1, "display": None,
               "alerts": False, "alertThreshold": 5, "portfolioAlertThreshold": 2.5,
               "rebalanceWhole": None,
               "theme": "dark", "opacity": 0.88, "updates": True, "welcome": True,
-              "cash": {}, "invested": None}
+              "cash": {}, "invested": None, "targets": None, "goal": None}
 # "portfolio reset-all" (13.4): these keys leave _settings in one write (the
 # name, the targets and the windows stay); data.json's "ui" gets the defaults.
 # 13.5: "welcome" too, so starting over brings the welcome card back
@@ -235,6 +305,83 @@ def cash_view(value):
     return out
 
 
+TARGETS_MAX = 80        # names in one target mix
+
+
+def parse_targets_arg(value):
+    """The target mix as typed (13.6): a JSON object {name: 0-100} ->
+    (insertion-ordered {name: int | 2-decimal float}, None), (None, None)
+    for "", default, none or {} (the key goes), or (None, error). The
+    names are checked against the file later (check_target_names)."""
+    text = str(value).strip()
+    if text.lower() in ("", "default", "none", "{}"):
+        return None, None
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        obj = None
+    if not isinstance(obj, dict):
+        return None, ('targets must be an object like {"Tech": 30, "cash": 10}, got %s'
+                      % text[:40])
+    if len(obj) > TARGETS_MAX:
+        return None, "targets: at most %d names" % TARGETS_MAX
+    for k in obj:
+        if (not isinstance(k, str) or not 1 <= len(k.strip()) <= 40
+                or "\n" in k or "\r" in k):
+            return None, "targets: a name must be 1-40 characters"
+    import rebalance        # lazy: standard library only, like this file
+    entries, warns = rebalance.parse_targets(obj)
+    for w in warns:
+        if w.get("kind") in ("format", "value"):
+            return None, w.get("text") or "targets: a target is a number from 0 to 100"
+    out, seen = {}, set()
+    for k, pct in entries or []:
+        name = k.strip()
+        cf = name.casefold()
+        if cf in seen:
+            return None, "%s: listed twice" % name
+        seen.add(cf)
+        if cf == "cash":
+            name = "cash"
+        out[name] = int(pct) if pct == int(pct) else round(pct, 2)
+    return (out or None), None
+
+
+def parse_goal(text):
+    """The goal (13.6, ⚙ → Portfolio) from 'CUR AMOUNT YEAR' or 'CUR AMOUNT
+    YYYY-MM-DD' (text already trimmed and lower-cased): ({"value", "date",
+    "cur"}, None), (None, None) for default (removed), or (None, error).
+    A year alone means Dec 31 of that year; the date must be after today
+    and at most GOAL_YEARS_MAX years ahead."""
+    if text == "default":
+        return None, None
+    shape = ("goal must be a currency, an amount and a year, like CAD 250000 2035 "
+             "(or default to remove it), got %r" % text)
+    tokens = text.split()
+    if len(tokens) < 3 or not CURRENCY_RE.match(tokens[0]) or not GOAL_DATE_RE.match(tokens[-1]):
+        return None, shape
+    cur = tokens[0].upper()
+    amount = parse_amount(" ".join(tokens[1:-1]))
+    if amount is None:
+        return None, shape
+    d = tokens[-1]
+    try:
+        if len(d) == 4:
+            day = date(int(d), 12, 31)
+        else:
+            day = date(int(d[:4]), int(d[5:7]), int(d[8:10]))
+    except ValueError:
+        return None, shape
+    if amount == 0:
+        return None, "the goal amount must be more than 0"
+    today = date.today()
+    if day <= today:
+        return None, "the goal date must be after today, got %r" % tokens[-1]
+    if day.year > today.year + GOAL_YEARS_MAX:
+        return None, "the goal date must be within %d years, got %r" % (GOAL_YEARS_MAX, tokens[-1])
+    return {"value": amount, "date": day.isoformat(), "cur": cur}, None
+
+
 def parse_value(key, value):
     """(value to store, None) or (None, error). The stored value None means
     'remove the key' (back to the default)."""
@@ -251,6 +398,9 @@ def parse_value(key, value):
         if t is None:
             return None, "title must be 1–40 characters (no line breaks), got %r" % value
         return t, None
+    if key == "targets":
+        # before lower-casing too: a sector's spelling matters (13.6)
+        return parse_targets_arg(value)
     text = str(value).strip().lower()
     if key == "cash":
         # ("clear",) = all cash gone, ("drop", CUR) = that currency's gone,
@@ -276,9 +426,13 @@ def parse_value(key, value):
         if text == "default":
             return None, None
         num = parse_amount(text)
+        if num == 0 and re.sub(r"[0.,\s']", "", text):
+            return None, "invested amount %r is too small (2 decimals at most) — 0 removes it" % text
         if num is None:
             return None, "invested must be an amount of money, like 25000, or default, got %r" % value
         return (num or None), None          # 0 removes it too
+    if key == "goal":
+        return parse_goal(text)             # 13.6
     if key == "portfolio":
         if text == "reset-all":
             return PF_RESET, None
@@ -361,6 +515,37 @@ def same(a, b):
     if isinstance(a, (dict, list)):
         return json.dumps(a) == json.dumps(b)
     return a == b
+
+
+def display_label(b, a):
+    """13.6: the "undo: ..." words for a display change, from the display
+    before (b) and after (a); a missing value is the one default window.
+    Never raises."""
+    try:
+        def wins(v):
+            c = display_prefs.clean_display(v)
+            return c["windows"] if c else [{"id": "main"}]
+        wb, wa = wins(b), wins(a)
+        if len(wb) != len(wa):
+            return "a window added" if len(wa) > len(wb) else "a window closed"
+        mb = dict((w.get("id"), w) for w in wb)
+        ma = dict((w.get("id"), w) for w in wa)
+        if set(mb) != set(ma):
+            return "what a window shows"
+        fields = set()
+        for i in mb:
+            for k in set(mb[i]) | set(ma[i]):
+                if json.dumps(mb[i].get(k), sort_keys=True) != json.dumps(ma[i].get(k), sort_keys=True):
+                    fields.add(k)
+        if fields and fields <= {"x", "y"}:
+            return "where a window sits"
+        if fields and fields <= {"w", "h", "zoom"}:
+            return "a window's size"
+        if fields == {"title"}:
+            return "a window's name"
+        return "what a window shows"
+    except Exception:
+        return "what a window shows"
 
 
 def patch_cached_ui(positions, updates):
@@ -495,17 +680,75 @@ def update_top_level(raw, key, value):
     return changed, cash_view(cash)
 
 
+def check_target_names(raw, value, positions):
+    """The target mix's names against the file (13.6): "cash", a held ticker
+    (its spelling as held) or a sector (data.json's spelling, or a holding's
+    own "theme" tag). Without data.json's sectors yet (no refresh so far)
+    an unknown name is kept as typed. pf.fail on an unknown name or a ticker whose sector has a target
+    too (rebalance.build_targets would ignore it). -> the normalised dict."""
+    held = {}
+    for k in raw:
+        if not k.startswith("_") and (pf.held_shares(raw[k]) or 0) != 0:
+            held[k.upper()] = k
+    data = pf.load_data(positions)
+    themes, tk_theme = {}, {}
+    for t in data.get("themes") or []:
+        if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"].strip():
+            themes.setdefault(t["name"].strip().casefold(), t["name"])
+    known = bool(themes)        # data.json's sectors: without them (no refresh
+                                # yet) a name that is no holding is kept as typed
+    for k, entry in raw.items():
+        if (not k.startswith("_") and isinstance(entry, dict)
+                and isinstance(entry.get("theme"), str) and entry["theme"].strip()):
+            themes.setdefault(entry["theme"].strip().casefold(), entry["theme"].strip())
+            tk_theme[k] = entry["theme"].strip().casefold()
+    for p in data.get("positions") or []:
+        if isinstance(p, dict) and isinstance(p.get("ticker"), str) \
+                and isinstance(p.get("theme"), str) and p["theme"].strip():
+            tk_theme[p["ticker"]] = p["theme"].strip().casefold()   # what the tracker used
+    out, kinds = {}, {}
+    for key, pct in value.items():
+        if key.casefold() == "cash":
+            name, kind = "cash", "cash"
+        elif key.upper() in held:
+            name, kind = held[key.upper()], "ticker"
+        elif key.casefold() in themes:
+            name, kind = themes[key.casefold()], "sector"
+        elif not known:
+            name, kind = key, "unknown"     # no data.json yet: kept as typed
+        else:
+            pf.fail("%s: not one of your holdings, sectors or cash" % key)
+        if name in out:
+            pf.fail("%s: listed twice" % key)
+        out[name], kinds[name] = pct, kind
+    sectors = dict((n.casefold(), n) for n, kd in kinds.items() if kd == "sector")
+    for name, kd in kinds.items():
+        if kd == "ticker" and tk_theme.get(name) in sectors:
+            pf.fail("%s: its sector %s has a target too — give one or the other"
+                    % (name, sectors[tk_theme[name]]))
+    return out
+
+
 def save_top_level(positions, key, value):
     """set_setting.py cash / invested: one write (none when nothing
     changed), data.json's "ui" patched, a refresh asked for when it changed
     (the totals and the returns use them); replies and exits."""
     buf = io.StringIO()
+    undo = None
     try:
         with contextlib.redirect_stdout(buf):
             raw = pf.load(positions)
+            names = [TOP_LEVEL[key]]
+            before = pf.snap(raw, names)
             changed, new = update_top_level(raw, key, value)
             if changed:
+                bk = pf.setting_backup(positions)       # 13.6
                 pf.save(positions, raw)
+                try:                                    # never fails a save
+                    undo = pf.undo_push(positions, key, LABELS.get(key, key), "", names,
+                                        before, pf.snap(raw, names), backup=bk)
+                except Exception:
+                    undo = None
         patch_cached_ui(positions, {key: new})
         if changed:
             pf.request_refresh(positions)
@@ -514,7 +757,149 @@ def save_top_level(positions, key, value):
         reply({"error": msg[len("error: "):] if msg.startswith("error: ") else msg or "failed"}, 1)
     except Exception as e:
         reply({"error": "could not save: %s" % e}, 1)
-    reply({"ok": True, "key": key, "value": new})
+    out = {"ok": True, "key": key, "value": new}
+    if changed and undo:
+        out["undo"] = undo
+    reply(out)
+
+
+def ui_default(n):
+    """What data.json's "ui" shows for a key with nothing saved."""
+    for table in (UI_DEFAULT, dict(RESET_ALL), dict(PORTFOLIO_RESET)):
+        if n in table:
+            return table[n]
+    return None
+
+
+def known_names():
+    return set(KEYS) | set(k for k, _ in RESET_ALL) | set(k for k, _ in PORTFOLIO_RESET)
+
+
+def undo_rec_ok(rec):
+    """13.6: an undo record may only touch settings: _cash / _invested at the
+    top level (spot "") or known keys in _settings. Anything else in
+    .cache/setting_undo.json (hand-edited, corrupt) is never applied."""
+    names = rec.get("names")
+    if not names or not all(isinstance(n, str) for n in names):
+        return False
+    if rec.get("spot") == "_settings":
+        return set(names) <= (known_names() - {"undo"})
+    if rec.get("spot") == "":
+        return set(names) <= set(TOP_LEVEL.values())
+    return False
+
+
+def rec_label(rec):
+    return rec.get("label") or LABELS.get(rec.get("key"), rec.get("key"))
+
+
+def undo_still_after(container, rec):
+    """True when every recorded name is still as the change left it."""
+    for n in rec["names"]:
+        if (n in container) != (n in rec["after"]):
+            return False
+        if n in container and (json.dumps(container[n], sort_keys=True)
+                               != json.dumps(rec["after"][n], sort_keys=True)):
+            return False
+    return True
+
+
+def undo_restore(positions, raw, rec):
+    """Put the record's before values back into raw and save (with a
+    backup first). pf.fail when _settings is not an object."""
+    if rec["spot"] == "_settings":
+        container = raw.get("_settings")
+        if container is None:
+            container = raw["_settings"] = {}
+        if not isinstance(container, dict):
+            pf.fail("_settings in positions.json should be an object — fix it first")
+    else:
+        container = raw
+    for n in rec["names"]:
+        if n in rec["before"]:
+            container[n] = json.loads(json.dumps(rec["before"][n]))
+        else:
+            container.pop(n, None)
+    pf.setting_backup(positions)
+    pf.save(positions, raw)
+
+
+def undo_after_save(positions, recs, rec):
+    """After an undo's save: drop the record, patch data.json's "ui", ask
+    for the data the restored values need. Returns the ui map. Best effort:
+    the caller catches errors, so a restored file always gets its ok."""
+    pf.undo_write(positions, recs[:-1])
+    before, names = rec["before"], rec["names"]
+    uimap = {}
+    if rec["spot"] == "_settings":
+        known = known_names()
+        for n in names:
+            if n in known:
+                uimap[n] = before[n] if n in before else ui_default(n)
+    else:
+        if "_cash" in names:
+            uimap["cash"] = cash_view(before.get("_cash"))
+        if "_invested" in names:
+            uimap["invested"] = amount_view(before.get("_invested"))
+    if uimap:
+        patch_cached_ui(positions, uimap)
+    if (rec["spot"] == "" or any(n in REFRESH_KEYS for n in names)
+            or any(n not in known_names() for n in names)):
+        pf.request_refresh(positions)
+    if "display" in names and rec["spot"] == "_settings":
+        # the old plan is what was in the file, the new one the restored one
+        if news_refresh_wanted(display_prefs.news_plan(rec["after"].get("display")),
+                               display_prefs.news_plan(before.get("display")), positions):
+            request_news_refresh(positions)
+    return uimap
+
+
+def undo_last(positions, want):
+    """set_setting.py undo [ID] (13.6): put back the newest recorded
+    settings change — only its own keys, so a buy, sale or alert since
+    stays. Refuses when the newest record is not ID, or when one of its
+    keys changed since (that record is then dropped). Pushes no record
+    itself: one level at a time, newest first, no redo. Replies and exits
+    (reply() exits, so it runs only after the try)."""
+    buf = io.StringIO()
+    code, result = 1, None
+    try:
+        with contextlib.redirect_stdout(buf):
+            raw = pf.load(positions)        # holds the edit lock until exit
+            recs = pf.undo_records(positions)
+            if recs and not undo_rec_ok(recs[-1]):   # a bad newest record is dropped, never applied
+                while recs and not undo_rec_ok(recs[-1]):
+                    recs = recs[:-1]
+                pf.undo_write(positions, recs)
+            rec = recs[-1] if recs else None
+            if rec is None:
+                result = {"error": "nothing to undo — no setting changed in the last day"}
+            elif want and want != str(rec["id"]):
+                result = {"error": "the last change is now " + rec_label(rec)
+                          + " — click undo again to put that back",
+                          "next": pf.undo_summary(rec)}
+            elif not undo_still_after(pf.section(raw, rec["spot"]), rec):
+                pf.undo_write(positions, recs[:-1])
+                result = {"error": rec_label(rec) + " was changed again since — nothing undone",
+                          "next": pf.undo_summary(recs[-2]) if len(recs) > 1 else None}
+            else:
+                undo_restore(positions, raw, rec)
+                uimap = {}
+                try:
+                    uimap = undo_after_save(positions, recs, rec)
+                except Exception:
+                    pass
+                code = 0
+                result = {"ok": True, "key": "undo", "value": None,
+                          "undone": {"key": rec["key"], "label": rec_label(rec)},
+                          "ui": uimap,
+                          "next": pf.undo_summary(recs[-2]) if len(recs) > 1 else None}
+    except SystemExit:
+        msg = buf.getvalue().strip()
+        code, result = 1, {"error": msg[len("error: "):] if msg.startswith("error: ") else msg or "failed"}
+    except Exception as e:
+        code, result = 1, {"error": "could not undo: %s" % e}
+    reply(result, code)
 
 
 def main():
@@ -527,6 +912,10 @@ def main():
 
     if args.key not in KEYS:
         reply({"error": "unknown setting %r (one of: %s)" % (args.key, ", ".join(KEYS))}, 1)
+    if args.key == "undo":
+        if not os.path.exists(args.positions):
+            reply({"error": "no positions file yet"}, 1)
+        undo_last(args.positions, args.value.strip())     # replies and exits
     value, err = parse_value(args.key, args.value)
     if err:
         reply({"error": err}, 1)
@@ -540,6 +929,13 @@ def main():
     # portfolio_file's load/save: pf.fail prints plain text and exits, so
     # its message is caught and passed on as JSON
     buf = io.StringIO()
+    undo = None
+    if value is display_prefs.RESET:
+        names = [k for k, _ in RESET_ALL]
+    elif value is PF_RESET:
+        names = [k for k, _ in PORTFOLIO_RESET]
+    else:
+        names = [args.key]
     try:
         with contextlib.redirect_stdout(buf):
             raw = pf.load(args.positions)
@@ -548,6 +944,10 @@ def main():
                 settings = raw["_settings"] = {}
             if not isinstance(settings, dict):
                 pf.fail("_settings in positions.json should be an object — fix it first")
+            if args.key == "targets" and value is not None:
+                # 13.6: the names need the file (held tickers, sectors)
+                value = check_target_names(raw, value, args.positions)
+            before = pf.snap(settings, names)      # 13.6: for "undo"
             changed = False
             old_plan = display_prefs.news_plan(settings.get("display")) if args.key == "display" else None
             if value is display_prefs.RESET:   # "display reset-all"
@@ -568,7 +968,22 @@ def main():
                 settings[args.key] = value
                 changed = True
             if changed:
+                bk = pf.setting_backup(args.positions)  # 13.6: at most one per 10 s
                 pf.save(args.positions, raw)
+                try:                                    # never fails a save
+                    after = pf.snap(settings, names)
+                    if value is display_prefs.RESET or value is PF_RESET:
+                        label = RESET_LABELS.get(args.key, LABELS.get(args.key, args.key))
+                    elif args.key == "display":
+                        label = display_label(before.get("display"), after.get("display"))
+                    else:
+                        label = LABELS.get(args.key, args.key)
+                    undo = pf.undo_push(
+                        args.positions, args.key, label, "_settings", names, before, after,
+                        backup=bk,
+                        kind="reset" if (value is display_prefs.RESET or value is PF_RESET) else "set")
+                except Exception:
+                    undo = None
         # the widget already shows the change; the cached data.json gets it
         # too, so a restart starts in it — no fetch for a display choice
         if value is display_prefs.RESET:
@@ -578,7 +993,7 @@ def main():
         else:
             patch_cached_ui(args.positions, {
                 args.key: UI_DEFAULT.get(args.key) if value is None else value})
-        if (args.key in ("benchmark", "currency", "backtestYears") or value is PF_RESET) and changed:
+        if (args.key in REFRESH_KEYS or value is PF_RESET) and changed:
             # new data needed (none for the choice already saved): one fetch
             # with the new index / in the new currency / over the longer
             # history (whose long history the history job then plans like
@@ -596,13 +1011,17 @@ def main():
     except Exception as e:
         reply({"error": "could not save: %s" % e}, 1)
     if value is display_prefs.RESET:
-        reply({"ok": True, "key": args.key, "value": None,
-               "reset": [k for k, _ in RESET_ALL]})
-    if value is PF_RESET:
-        reply({"ok": True, "key": args.key, "value": None,
-               "reset": [k for k, _ in PORTFOLIO_RESET], "ui": dict(PORTFOLIO_RESET)})
-    reply({"ok": True, "key": args.key,
-           "value": UI_DEFAULT.get(args.key) if value is None else value})
+        out = {"ok": True, "key": args.key, "value": None,
+               "reset": [k for k, _ in RESET_ALL]}
+    elif value is PF_RESET:
+        out = {"ok": True, "key": args.key, "value": None,
+               "reset": [k for k, _ in PORTFOLIO_RESET], "ui": dict(PORTFOLIO_RESET)}
+    else:
+        out = {"ok": True, "key": args.key,
+               "value": UI_DEFAULT.get(args.key) if value is None else value}
+    if changed and undo:
+        out["undo"] = undo          # 13.6: what "undo" in ⚙ would put back
+    reply(out)
 
 
 if __name__ == "__main__":

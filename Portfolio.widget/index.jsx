@@ -41,9 +41,9 @@ const SORT_TIP = {
 // (that crashed the 12.x upgrade with "undefined is not an object"), so any
 // state not stamped with this version starts over, keeping only the data
 // that is already on screen. Bump it whenever the state's shape changes.
-const STATE_VERSION = "13.5";
+const STATE_VERSION = "13.6";
 // the release (CHANGELOG.md); the footer offers an update when GitHub's newest release is newer
-const VERSION = "13.5";
+const VERSION = "13.6";
 
 // older day-by-day rows loaded on demand ("older ›", an old date typed in the
 // date box, a custom start before the newest ~400 days). `key` ties them to
@@ -76,6 +76,7 @@ export const initialState = {
   older: NO_OLDER,     // older day rows loaded on demand
   btMode: "held",      // simulated part: today's share counts ("held") or today's weights ("weighted")
   salesExpanded: false, // sales panel: the newest 5 sales, or all (up to 20)
+  incomeView: "bars",  // income panel (13.6): "bars" (next 12 months) | "next" (next ex-dividend dates) | "years" (received per year)
   pos: null,           // where it was dragged {x, y}; false = back to the default spot; null = as saved (data.ui)
   scale: null,         // its size (the corner grip), 0.6–1.6; null = as saved (data.ui)
   alertInput: "", alertMsg: null, alertBusy: false,   // the "alert at…" box in a detail view (12.9)
@@ -101,6 +102,8 @@ export const initialState = {
   lookBy: {},            // ticker -> {data, busy, error}: full chart data per stock (was the one-slot `look`)
   newsBy: {},            // ticker -> {items, busy, error}: headlines per stock (was the one-slot `news`)
   editOpen: false, editGroup: null, editConfirm: null,   // the ⚙ editor (per window)
+  // 13.6: the target-mix editor's unsaved fields {vals: {"s:<sector>"|"t:<TICKER>"|"cash": text}, split: {<sector>: bool}}
+  tgtDraft: null,        // (per window; 13.6: kept when ⚙ closes, dropped on save / start over / remove)
   newsPage: 0,           // the news panel's page (per window)
   newsQuery: null, newsQFrom: "",   // the news page's live keyword (13.1; newsQFrom = the cfg.q it was typed over; not saved)
   newsPickMsg: null,     // the news page editor's "not a ticker: …" note (5 s)
@@ -109,6 +112,9 @@ export const initialState = {
   // history save {key, epoch, msg} (shown while data.json still carries that
   // epoch) and a per-setting message {key: text} (an error, or a 5 s note)
   editAdvanced: false, editHints: true, settingPending: null, editMsg: {},
+  // 13.6: "undo" in ⚙ — the newest settings change {id, key, label, at, busy}
+  // (from a save's reply) and the note after an undo {text, err, at}
+  settingUndo: null, undoNote: null,
   // 13.4: the editor's search box (per window); the import panel of the +
   // form {open, text, file, rows, ok, skipped, busy, msg} (shared); the
   // update offer in the footer: its question open, "later" for a version,
@@ -122,16 +128,23 @@ export const initialState = {
   // 13.5: the setup / no-data card's message {text, err, tick} ("opening
   // Terminal…", "copied…") and its "details" switch; shared, not in WIN_KEYS
   setupMsg: null, errDetails: false,
+  // 13.6: a note and a price target per stock (the detail view's note rows,
+  // holding_meta.py). Per window: which box is open ("note" | "target"),
+  // what is typed in it, a save under way, its message and the tick it came at
+  noteEdit: null, noteInput: "", noteBusy: false, noteMsg: null, noteMsgTick: 0,
+  // shared, not in WIN_KEYS: what the last save returned {tick, map: {TK: entry|null}},
+  // shown until data.json's "notes" catches up (NOTES_HOLD_TICKS)
+  notesLocal: null,
 };
 
 // Per-window state: every window keeps its own copy of these (range, pinned
 // point, view, open stock…); the rest of the state is shared by all windows.
 const WIN_KEYS = ["range", "graphMode", "plMode", "view", "mapRange", "mapExpanded", "sort", "pinnedPage",
   "pinnedSection", "focusTicker", "lookTicker", "showAdd", "detailRange", "detailMsg", "mark", "hoverT", "dayInput",
-  "dayMsg", "dayPage", "earnPage", "sectorScale", "sectorOrder", "from", "sectorFocus", "btMode", "salesExpanded",
+  "dayMsg", "dayPage", "earnPage", "sectorScale", "sectorOrder", "from", "sectorFocus", "btMode", "salesExpanded", "incomeView",
   "alertInput", "alertMsg", "alertBusy", "alertMsgTick", "alertsExpanded", "rebalExpanded", "benchPick",
   "benchInput", "benchMsg", "rot", "rotBase", "hover", "editOpen", "editGroup", "editConfirm", "newsPage", "newsQuery", "newsQFrom", "newsPickMsg",
-  "editQuery"];
+  "editQuery", "tgtDraft", "noteEdit", "noteInput", "noteBusy", "noteMsg", "noteMsgTick"];
 const WIN_INITIAL = {};
 WIN_KEYS.forEach((k) => { WIN_INITIAL[k] = initialState[k]; });
 
@@ -184,6 +197,104 @@ const bandOf = (d) => (d && d.targets && typeof d.targets.band === "number" && i
 const fmtPts = (v) => (typeof v !== "number" || !isFinite(v) ? "—" : Math.abs(v) < 0.05 ? "0.0"
   : (v > 0 ? "+" : "−") + Math.abs(v).toFixed(Math.abs(v) >= 99.95 ? 0 : 1));
 const fmtTarget = (v) => (typeof v === "number" && isFinite(v) ? String(Math.round(v * 100) / 100) + "%" : "—");
+
+// The target-mix editor (⚙ → Portfolio, 13.6). A typed % : "" = empty (null),
+// "12", "12.5", "12,5 %" = a number, anything else or outside 0-100 = NaN
+const tgtParse = (text) => {
+  const t = String(text === null || text === undefined ? "" : text);
+  if (!t.trim()) return null;
+  const m = /^\s*(\d+(?:[.,]\d+)?)\s*%?\s*$/.exec(t);
+  const n = m ? Number(m[1].replace(",", ".")) : NaN;
+  return isFinite(n) && n >= 0 && n <= 100 ? n : NaN;
+};
+const plainObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+// the saved mix {name: pct}: data.json ui.targets; a 13.5 data.json (before the
+// first 13.6 refresh) has only the explicit buckets
+const savedTargets = (d) => {
+  const ui = d && plainObj(d.ui) ? d.ui : {};
+  if (plainObj(ui.targets)) return ui.targets;
+  const out = {};
+  targetBuckets(d).forEach((b) => { if (b.implicit === false && typeof b.targetPct === "number") out[b.key] = b.targetPct; });
+  return out;
+};
+// the editor's rows: sectors (data.json themes order) with their holdings, cash, and the
+// saved mix keyed "s:<sector>" | "t:<TICKER>" | "cash" (stale = names not held any more,
+// nested = holdings whose sector has a % too: rebalance ignores their own %)
+const tgtModel = (d, rawIn) => {   // rawIn: the mix just saved, until data.json carries it
+  const ps = d && Array.isArray(d.positions) ? d.positions : [];
+  const sectors = (d && Array.isArray(d.themes) ? d.themes : []).filter((t) => t && typeof t.name === "string").map((t) => ({
+    name: t.name, nowPct: typeof t.weightPct === "number" ? t.weightPct : 0,
+    tickers: ps.filter((p) => p && p.theme === t.name && typeof p.ticker === "string")
+      .map((p) => ({ ticker: p.ticker, nowPct: typeof p.weightPct === "number" ? p.weightPct : 0 })),
+  }));
+  const tv = d && d.totals && typeof d.totals.value === "number" ? d.totals.value : 0;
+  const cashNow = typeof (d && d.cash) === "number" && isFinite(d.cash) && tv > 0 ? d.cash / tv * 100 : 0;
+  const secOf = {};
+  sectors.forEach((s) => { secOf[s.name.toLowerCase()] = s.name; });
+  const tkName = {};
+  sectors.forEach((s) => s.tickers.forEach((t) => { tkName[t.ticker.toUpperCase()] = t.ticker; }));
+  const saved = {}, stale = [], split0 = {}, nested = [];
+  const raw = plainObj(rawIn) ? rawIn : savedTargets(d);
+  Object.keys(raw).forEach((k) => {
+    const pct = Number(raw[k]);
+    if (!isFinite(pct)) return;
+    const lk = String(k).trim().toLowerCase(), uk = String(k).trim().toUpperCase();
+    const key = lk === "cash" ? "cash" : tkName[uk] ? "t:" + tkName[uk] : secOf[lk] ? "s:" + secOf[lk] : null;
+    if (!key) stale.push([String(k), pct]);
+    else if (!(key in saved)) saved[key] = pct;   // the first one counts
+  });
+  sectors.forEach((s) => {
+    const tks = s.tickers.filter((t) => ("t:" + t.ticker) in saved);
+    if (("s:" + s.name) in saved) tks.forEach((t) => nested.push({ ticker: t.ticker, sector: s.name }));
+    else if (tks.length) split0[s.name] = true;
+  });
+  return { sectors: sectors, cashNow: cashNow, saved: saved, split0: split0, stale: stale, nested: nested,
+    any: Object.keys(saved).length > 0 };
+};
+// a field's text: typed in the draft, else the saved %; a sector split by holding: the draft's choice, else split0
+const tgtText = (model, draft, key) => (draft && draft.vals && typeof draft.vals[key] === "string" ? draft.vals[key]
+  : key in model.saved ? String(model.saved[key]) : "");
+const tgtSplitOf = (model, draft, name) => (draft && draft.split && typeof draft.split[name] === "boolean"
+  ? draft.split[name] : model.split0[name] === true);
+// what "save" would write: {sum, bad: [label], obj: {name: pct} (sectors with their holdings, then cash;
+// empty fields left out), sums: {sector: % of its holdings}}
+const tgtCollect = (model, draft) => {
+  let sum = 0;
+  const bad = [], obj = {}, sums = {};
+  const take = (key, name, label) => {
+    const n = tgtParse(tgtText(model, draft, key));
+    if (n === null) return 0;
+    if (isNaN(n)) { bad.push(label); return 0; }
+    obj[name] = n; sum += n;
+    return n;
+  };
+  model.sectors.forEach((s) => {
+    if (tgtSplitOf(model, draft, s.name)) sums[s.name] = s.tickers.reduce((a, t) => a + take("t:" + t.ticker, t.ticker, t.ticker), 0);
+    else take("s:" + s.name, s.name, s.name);
+  });
+  take("cash", "cash", "cash");
+  return { sum: sum, bad: bad, obj: obj, sums: sums };
+};
+// does the draft differ from the saved mix? (names not held any more and unused
+// holding %s count as a change: saving leaves them out)
+const tgtDirty = (model, draft) => {
+  if (!draft) return false;
+  if (model.stale.length || model.nested.length) return true;
+  return JSON.stringify(tgtCollect(model, draft).obj) !== JSON.stringify(tgtCollect(model, null).obj);
+};
+// "start from today's mix": each sector's and the cash's share now, whole %s that add up to exactly 100
+const todaysMix = (model) => {
+  const items = model.sectors.map((s) => ({ key: "s:" + s.name, v: Math.max(0, s.nowPct || 0) }))
+    .concat([{ key: "cash", v: Math.max(0, model.cashNow || 0) }]);
+  const tot = items.reduce((a, it) => a + it.v, 0);
+  const vals = {};
+  if (!(tot > 0)) return { vals: vals, split: {} };
+  items.forEach((it) => { it.x = it.v / tot * 100; it.n = Math.floor(it.x); });
+  let left = 100 - items.reduce((a, it) => a + it.n, 0);
+  items.slice().sort((a, b) => (b.x - b.n) - (a.x - a.n)).forEach((it) => { if (left > 0) { it.n += 1; left -= 1; } });
+  items.forEach((it) => { if (!(it.key === "cash" && it.n === 0)) vals[it.key] = String(it.n); });
+  return { vals: vals, split: {} };
+};
 
 // Where the widget sits and how big it is (_settings.position / .scale via
 // data.ui, 12.8): a drag this session wins, like the display choices above.
@@ -248,8 +359,13 @@ const LAYOUT_K = {
   ADD_FORM: 124, STAT: 16, BENCH_PICK: 180, COMPACT_SPARK: 90, WELCOME: 78, IMPORT: 118,
   // panel estimates (est.* in renderWin): fixed parts and one row each
   DETAIL: 262, DETAIL_X: 58, EMPTY_MSG: 44, MAPTABS: 16, MOVER_ROW: 14, TODAY_FIX: 30, THEME_ROW: 18,
-  RISK_ROW: 13, RISK_FIX: 62, INCOME: 64, REBAL_FIX: 28, SALE_ROW: 14, RULE_ROW: 15, MORE: 14, WATCH_ROW: 16,
+  RISK_ROW: 13, RISK_FIX: 62, INCOME: 64, INCOME_TABS: 14, INCOME_BARS: 40, INCOME_ROW: 12, REBAL_FIX: 28, SALE_ROW: 14, RULE_ROW: 15, MORE: 14, WATCH_ROW: 16,
+  CUR_ROW: 14, CUR_FIX: 30,   // 13.6: the currencies panel: one currency row, and its two summary lines
   THEME_MIN: 272, COL_BASE: 300, EYE_CH: 7.2, CHIP_PAD: 14, CHIP_TIGHT: 8, TAB_SEP: 17, COL_GAP: 8,
+  NARROW: 400, TAB_READOUT: 100, SLIVER_W: 30, SLIVER_H: 16,
+  NOTE_ROWS: 32, NOTE_EDIT: 20,   // 13.6: a detail view's price target + note rows (2 × STAT) and their open box
+  UNDO_CHIP: 150, UNDO_FULL_W: 420,   // 13.6: the ⚙ undo chip's max width; narrower content shows just "undo"
+  GOAL_BAR: 46,   // 13.6: the goal line's progress bar (40 px) and its margin
 };
 const WIDGET_W = LAYOUT_K.BASE_CW + LAYOUT_K.PAD_X;   // 664: a window's default width
 
@@ -272,6 +388,7 @@ const FEATURES = [
   { id: "header.realized", label: "realized gains", tip: "profit or loss from what you have already sold", kind: "head", p: "room" },
   { id: "header.totalReturn", label: "total return", tip: "profit plus dividends, against what you invested", kind: "head", p: "room" },
   { id: "header.annual", label: "annual return", tip: "the yearly return, on average", kind: "head", p: "room" },
+  { id: "header.goal", label: "goal", tip: "how close you are to the goal set in ⚙ → Portfolio → a goal to reach", kind: "head", p: "normal" },
   { id: "graph", label: "graph", tip: "the value graph", kind: "block", p: "normal" },
   { id: "graph.tabs", label: "time range buttons", tip: "the 1D · 1W · 1M … buttons that set the graph's time range", kind: "part", parent: "graph", p: "normal" },
   { id: "graph.range.1H", label: "1H", tip: "the last hour", kind: "part", parent: "graph.tabs" },
@@ -288,7 +405,7 @@ const FEATURES = [
   { id: "graph.mode.value", label: "value", tip: "the graph shows what the portfolio is worth", kind: "part", parent: "graph.modes" },
   { id: "graph.mode.pl", label: "p&l", tip: "the graph shows profit or loss", kind: "part", parent: "graph.modes" },
   { id: "graph.mode.sectors", label: "sectors", tip: "the graph shows each sector", kind: "part", parent: "graph.modes" },
-  { id: "graph.date", label: "jump to a date", tip: "type a date to jump the graph there", kind: "part", parent: "graph.tabs" },
+  { id: "graph.date", label: "jump to a date", tip: "type a date to jump the graph there (hidden in windows narrower than 400 px)", kind: "part", parent: "graph.tabs" },
   { id: "graph.readout", label: "value under the mouse", tip: "the value at the point under the mouse", kind: "part", parent: "graph.tabs" },
   { id: "graph.big", label: "bigger-graph button (⤢)", tip: "the button that makes the graph taller", kind: "part", parent: "graph.tabs" },
   { id: "graph.bench", label: "index line", tip: "a thin grey line for the index you compare with", kind: "part", parent: "graph", p: "room" },
@@ -314,6 +431,7 @@ const FEATURES = [
   { id: "panel.earnings", label: "earnings dates", tip: "when each company reports next", kind: "panel", p: "normal", side: "b" },
   { id: "panel.sales", label: "sales and realized gains", tip: "what you sold and the profit on it", kind: "panel", p: "room", side: "b" },
   { id: "panel.income", label: "dividend income", tip: "dividends received and expected", kind: "panel", p: "room", side: "b" },
+  { id: "panel.currencies", label: "currencies", tip: "how much sits in each currency, and what currency moves did today and since you bought", kind: "panel", p: "room", side: "b" },
   { id: "panel.rebalance", label: "rebalancing", tip: "what to buy or sell to get back to your targets", kind: "panel", p: "normal", side: "b" },
   { id: "panel.priceAlerts", label: "your price alerts", tip: "price levels you set yourself — works without big-move alerts", kind: "panel", p: "normal", side: "b" },
   { id: "panel.alerts", label: "big moves this week", tip: "the week's big moves — needs Portfolio → big-move alerts on", kind: "panel", p: "normal", side: "b" },
@@ -402,6 +520,13 @@ const newsList = (v) => {
 // kept; null when `news` is not an object (then it is dropped)
 // market headlines (13.3): the tracker's NEWS_FEEDS, cached under "@<id>"
 const NEWS_FEEDS = { cnbc: "CNBC", marketwatch: "MarketWatch", yahoo: "Yahoo Finance", ft: "FT" };
+// 13.6: the words the ⚙ search finds each news option by (newsEditorNode's row keys)
+const NEWS_OPT_WORDS = {
+  scope: "whose movers holdings watchlist both pick", pick: "tickers pick", picked: "picked tickers",
+  per: "per stock headlines how many", sort: "order sort newest movers a-z", span: "since today 3 days week age",
+  layout: "layout dense group by ticker source time", market: "market news feed " + Object.values(NEWS_FEEDS).join(" "),
+  mute: "muted mute unmute", q: "keyword filter",
+};
 const NEWS_FEED_IDS = Object.keys(NEWS_FEEDS);
 const isFeedKey = (tk) => typeof tk === "string" && tk.charAt(0) === "@";
 const newsTagText = (tk) => (isFeedKey(tk) ? NEWS_FEEDS[tk.slice(1)] || tk.slice(1) : tk);
@@ -559,6 +684,16 @@ const runQueued = (args) => {
   settingChain = p.then(() => null, () => null);
   return p;
 };
+// 13.6: a saved setting's reply carries "undo" {id, key, label, t} (the newest
+// record of the undo stack): it becomes the ⚙ chip. Never throws.
+const offerUndo = (out, dispatch) => {
+  try {
+    const r = parseJson(String(out).trim());
+    if (r && r.ok && r.undo && dispatch) dispatch({ type: "UNDO_OFFER", undo: r.undo, at: Date.now() });
+  } catch (e) { /* no chip */ }
+};
+// the chip's record while it is fresh (UNDO_SHOW_MS), else null
+const undoFresh = (u, now) => (u && typeof u.at === "number" && now - u.at < UNDO_SHOW_MS ? u : null);
 // a portfolio setting from the ⚙ editor: the reply's ui value goes into
 // data.ui at once (UI_PATCH), an error shows under the row (EDIT_MSG)
 const saveSetting = (key, value, dispatch) => runQueued(["setting", key, String(value)]).then((out) => {
@@ -569,14 +704,17 @@ const saveSetting = (key, value, dispatch) => runQueued(["setting", key, String(
   }
   dispatch({ type: "EDIT_MSG", key: key, msg: null });
   if (r.ok && r.key === key && "value" in r) dispatch({ type: "UI_PATCH", key: key, value: r.value });
+  offerUndo(out, dispatch);
   return r;
 }, () => {
   dispatch({ type: "EDIT_MSG", key: key, msg: "could not save " + key });
   return { error: "could not save " + key };
 });
 const DISPLAY_SAVE_MS = 300;
+const UNDO_SHOW_MS = 180000;   // 13.6: the ⚙ "undo" chip shows for 3 min after a change
+const UNDO_NOTE_MS = 8000;     // ... and the note after an undo for 8 s
 const DISPLAY_SAVE_STUCK_MS = 15000;   // a save that never answers stops blocking the next one
-const dispSave = { timer: null, want: null, busy: 0 };
+const dispSave = { timer: null, want: null, busy: 0, dispatch: null };   // dispatch: for the reply's undo offer (13.6)
 const flushDisplay = () => {
   dispSave.timer = null;
   if ((dispSave.busy && Date.now() - dispSave.busy < DISPLAY_SAVE_STUCK_MS) || dispSave.want === null) return;
@@ -588,10 +726,11 @@ const flushDisplay = () => {
     dispSave.busy = 0;
     if (dispSave.want !== null && !dispSave.timer) flushDisplay();
   };
-  runQueued(["setting", "display", arg]).then(done, done);
+  runQueued(["setting", "display", arg]).then((out) => { offerUndo(out, dispSave.dispatch); done(); }, done);
 };
 const saveDisplay = (disp, dispatch) => {
   dispatch({ type: "SET_DISPLAY", display: disp });
+  dispSave.dispatch = dispatch;
   dispSave.want = disp ? JSON.stringify(compactDisplay(disp)) : "default";
   if (dispSave.timer) clearTimeout(dispSave.timer);
   dispSave.timer = setTimeout(flushDisplay, DISPLAY_SAVE_MS);
@@ -601,9 +740,35 @@ const saveDisplay = (disp, dispatch) => {
 // replaces a display save still waiting and waits for one that is running.
 const resetAllDisplay = (dispatch) => {
   dispatch({ type: "RESET_LOOK" });
+  dispSave.dispatch = dispatch;
   dispSave.want = "reset-all";
   if (dispSave.timer) clearTimeout(dispSave.timer);
   flushDisplay();
+};
+// 13.6: the ⚙ "undo" chip: `setting undo ID` puts the newest change back
+// (only if it still is ID). A display save still waiting goes first (the
+// queue keeps the order), so the undo never lands before it.
+const undoSetting = (state, dispatch) => {
+  const u = undoFresh(state.settingUndo || null, Date.now());
+  if (!u || u.busy) return;
+  if (dispSave.timer) { clearTimeout(dispSave.timer); flushDisplay(); }
+  dispatch({ type: "UNDO_BUSY", on: true });
+  const fail = () => {
+    dispatch({ type: "UNDO_NOTE", text: "could not undo", err: true, at: Date.now() });
+    dispatch({ type: "UNDO_BUSY", on: false });
+  };
+  runQueued(["setting", "undo", String(u.id)]).then((out) => {
+    const r = parseJson(String(out).trim());
+    const at = Date.now();
+    if (r && r.ok) {
+      if (r.ui && typeof r.ui === "object" && "targets" in r.ui) { tgtSent.obj = null; tgtSent.epoch = null; }
+      dispatch({ type: "UNDO_APPLIED", ui: r.ui || {}, next: r.next || null, at: at });
+      dispatch({ type: "UNDO_NOTE", text: "put back: " + ((r.undone && r.undone.label) || "the last change"), err: false, at: at });
+    } else if (r && r.error) {
+      dispatch({ type: "UNDO_NOTE", text: r.error, err: true, at: at });
+      dispatch({ type: "UNDO_OFFER", undo: r.next || null, at: at });   // the next record replaces the busy one (or none)
+    } else fail();
+  }, fail);
 };
 // change one window (migrating from the legacy keys first when there is no display yet)
 const changeWin = (st, id, patch, dispatch) =>
@@ -635,6 +800,15 @@ const dailyKey = (d) => {
   const daily = Array.isArray(d.daily) ? d.daily : [];
   return (d.dailyFirst || "") + "|" + (d.dailyTotal || 0) + "|" + (daily.length && daily[0] ? daily[0][0] : "");
 };
+// 13.6: an "undo" record from set_setting.py's reply ({id, key, label, t}),
+// checked; anything else is null (no chip)
+const undoRec = (u, at) => (u && typeof u === "object" && typeof u.id === "number" && isFinite(u.id) && typeof u.key === "string"
+  ? { id: Number(u.id), key: String(u.key), label: String(u.label || u.key).slice(0, 80), at: at, busy: false } : null);
+// a saved key -> this session's mirror of it; null there = "as saved" (data.ui)
+// for each reader (graphBigOf, showBenchOf, compactOf, newsOn, wholeOf,
+// benchWantOf, posOf, scaleOf, the opacity slider)
+const UNDO_MIRRORS = [["position", "pos"], ["scale", "scale"], ["graphBig", "graphBig"], ["showBenchmark", "showBench"],
+  ["compact", "compact"], ["news", "newsPref"], ["rebalanceWhole", "rebalWhole"], ["benchmark", "benchWant"], ["opacity", "opacityDraft"]];
 
 // every case below sees ONE window's view of the state (the shared keys plus
 // that window's WIN_KEYS; see updateState) and never needs to know which window
@@ -674,6 +848,8 @@ const coreReducer = (event, prev) => {
       return merge(prev, { raw: parsed, parseError: parseError, tick: prev.tick + 1, justAdded: justAdded, demoSettled: demoSettled,
         rot: rot, rotBase: firstData ? rot : prev.rotBase, older: older,
         alertMsg: fade ? null : prev.alertMsg,
+        // 13.6: a saved note/target is held until data.json has surely caught up
+        notesLocal: prev.notesLocal && !(prev.tick + 1 - (prev.notesLocal.tick || 0) >= NOTES_HOLD_TICKS) ? prev.notesLocal : null,
         benchWant: benchWantAfter(prev, parsed && parsed.data),
         settingPending: prev.settingPending && parsed && parsed.data && parsed.data.epoch !== prev.settingPending.epoch ? null : prev.settingPending });
     }
@@ -695,6 +871,7 @@ const coreReducer = (event, prev) => {
     case "BENCH_FAIL":    // the save failed: back to the saved choice, the picker says why
       return merge(prev, { benchWant: null, benchPick: true, benchMsg: event.msg || "could not save" });
     case "SET_SALES_EXPANDED": return merge(prev, { salesExpanded: event.on === true });
+    case "SET_INCOME_VIEW": return merge(prev, { incomeView: ["bars", "next", "years"].indexOf(event.view) >= 0 ? event.view : "bars" });
     case "SET_POS": return merge(prev, { pos: event.pos === false ? false : validPos(event.pos) });
     case "SET_SCALE": return merge(prev, { scale: validScale(event.scale) });
     case "SET_BT_MODE": return merge(prev, { btMode: event.mode === "weighted" ? "weighted" : "held" });
@@ -743,13 +920,32 @@ const coreReducer = (event, prev) => {
         lookTicker: fresh ? event.ticker : prev.lookTicker,
         lookBy: fresh ? keepSome(prev.lookBy, event.ticker, { data: null, busy: false, error: null }) : prev.lookBy,
         alertInput: other ? "" : prev.alertInput, alertMsg: other ? null : prev.alertMsg,
-        alertBusy: other ? false : prev.alertBusy });
+        alertBusy: other ? false : prev.alertBusy,
+        // 13.6: and the note / price target box
+        noteEdit: other ? null : prev.noteEdit || null, noteInput: other ? "" : prev.noteInput || "",
+        noteBusy: other ? false : !!prev.noteBusy, noteMsg: other ? null : prev.noteMsg || null });
     }
     case "SET_ALERT_INPUT": return merge(prev, { alertInput: String(event.value || ""), alertMsg: null });
     case "ALERT_BUSY": return merge(prev, { alertBusy: true, alertMsg: event.msg || "working…" });
     case "ALERT_RESULT":   // ok clears the box; an error keeps what was typed
       return merge(prev, { alertBusy: false, alertMsg: event.msg || null, alertMsgTick: prev.tick,
         alertInput: event.ok && event.clear ? "" : prev.alertInput });
+    // 13.6: the note / price target box of a detail view (NoteRows)
+    case "NOTE_EDIT": return merge(prev, { noteEdit: event.field === "target" ? "target" : "note",
+      noteInput: String(event.value || ""), noteMsg: null });
+    case "NOTE_INPUT": return merge(prev, { noteInput: prev.noteEdit === "note" ? String(event.value || "").slice(0, 200)
+      : String(event.value || ""), noteMsg: null });
+    case "NOTE_CANCEL": return merge(prev, { noteEdit: null, noteInput: "", noteMsg: null });
+    case "NOTE_BUSY": return merge(prev, { noteBusy: true, noteMsg: "saving…" });
+    case "NOTE_RESULT": {   // ok closes the box and holds the saved entry; an error keeps what was typed
+      const base = { noteBusy: false, noteMsg: event.msg || null, noteMsgTick: prev.tick };
+      if (!event.ok) return merge(prev, base);
+      const held = notesFresh(prev.notesLocal, prev.tick) ? prev.notesLocal.map : {};
+      const add = {};
+      if (typeof event.ticker === "string" && event.ticker) add[event.ticker.toUpperCase()] = event.entry || null;
+      return merge(prev, merge(base, { noteEdit: null, noteInput: "",
+        notesLocal: { tick: prev.tick, map: merge(held, add) } }));
+    }
     case "NEWS_BUSY": return merge(prev, { newsBy: keepSome(prev.newsBy, event.ticker, { items: [], busy: true, error: null }) });
     case "NEWS_RESULT":    // kept per stock (another window may show it)
       if (!prev.newsBy || !prev.newsBy[event.ticker]) return prev;
@@ -826,8 +1022,12 @@ const coreReducer = (event, prev) => {
       editGroup: typeof event.group === "string" ? event.group : prev.editGroup });
     case "OPEN_EDITOR": return merge(prev, { editOpen: true, editConfirm: null, editQuery: "",   // (the welcome card's links)
       editGroup: typeof event.group === "string" ? event.group : prev.editGroup });
-    case "CLOSE_EDITOR": return prev.editOpen ? merge(prev, { editOpen: false, editConfirm: null, editQuery: "", opacityDraft: null })
-      : prev.opacityDraft != null ? merge(prev, { opacityDraft: null }) : prev;
+    case "CLOSE_EDITOR": {   // (13.6: Esc also closes an open note box)
+      const nb = prev.noteEdit ? { noteEdit: null, noteInput: "" } : {};
+      return prev.editOpen ? merge(prev, merge(nb, { editOpen: false, editConfirm: null, editQuery: "", opacityDraft: null }))
+        : prev.opacityDraft != null ? merge(prev, merge(nb, { opacityDraft: null }))
+        : prev.noteEdit ? merge(prev, nb) : prev;
+    }
     // the background slider (13.5): a number previews it, null = back to the saved value
     case "OPACITY_DRAFT": return merge(prev, { opacityDraft: typeof event.value === "number" && isFinite(event.value)
       ? Math.min(1, Math.max(0.3, event.value)) : null });
@@ -858,6 +1058,21 @@ const coreReducer = (event, prev) => {
     case "RESET_LOOK": return merge(prev, { display: false, wins: {}, geo: null, front: null,
       pos: false, scale: 1, graphBig: false, showBench: true, compact: false });
     case "EDIT_CONFIRM": return merge(prev, { editConfirm: event.what || null });
+    // the target-mix editor (13.6): a typed field, a sector split by holding or not, a whole fill, drop the draft
+    case "TGT_DRAFT": {
+      const dr = prev.tgtDraft || { vals: {}, split: {} };
+      const vals = Object.assign({}, dr.vals);
+      vals[String(event.key)] = String(event.value === null || event.value === undefined ? "" : event.value).slice(0, 8);
+      return merge(prev, { tgtDraft: { vals: vals, split: Object.assign({}, dr.split) } });
+    }
+    case "TGT_SPLIT": {
+      const dr = prev.tgtDraft || { vals: {}, split: {} };
+      const split = Object.assign({}, dr.split);
+      split[String(event.sector)] = !!event.on;
+      return merge(prev, { tgtDraft: { vals: Object.assign({}, dr.vals), split: split } });
+    }
+    case "TGT_FILL": return merge(prev, { tgtDraft: { vals: Object.assign({}, event.vals || {}), split: Object.assign({}, event.split || {}) } });
+    case "TGT_RESET": return merge(prev, { tgtDraft: null });
     case "SET_NEWS_PAGE": return merge(prev, { newsPage: Math.max(0, Math.round(event.page) || 0) });
     // the news page's live keyword (13.1): typed over cfg.q `from`; a cfg.q change from elsewhere wins again
     case "SET_NEWS_QUERY": return merge(prev, { newsQuery: typeof event.value === "string" ? event.value : null,
@@ -887,6 +1102,30 @@ const coreReducer = (event, prev) => {
         raw: Object.assign({}, prev.raw, { data: Object.assign({}, prev.raw.data, { ui: ui }) }) });
       return merge(prev, { raw: Object.assign({}, prev.raw, { data: Object.assign({}, prev.raw.data, { ui: ui }) }) });
     }
+    // 13.6: "undo" in ⚙ (the time `at` always comes in the event)
+    case "UNDO_OFFER": return merge(prev, { settingUndo: undoRec(event.undo, event.at) });
+    case "UNDO_BUSY": return prev.settingUndo ? merge(prev, { settingUndo: Object.assign({}, prev.settingUndo, { busy: !!event.on }) }) : prev;
+    case "UNDO_NOTE": return merge(prev, { undoNote: event.text ? { text: String(event.text).slice(0, 160), err: !!event.err, at: event.at } : null });
+    case "UNDO_APPLIED": {
+      // the restored values go into data.ui at once (one merge, like UI_PATCH),
+      // and this session's mirrors of those keys go back to "as saved"
+      const ui = event.ui && typeof event.ui === "object" ? event.ui : {};
+      const patch = { settingUndo: undoRec(event.next, event.at) };
+      if (prev.raw && prev.raw.data && typeof prev.raw.data === "object") {
+        const cur = prev.raw.data.ui && typeof prev.raw.data.ui === "object" ? prev.raw.data.ui : {};
+        patch.raw = Object.assign({}, prev.raw, { data: Object.assign({}, prev.raw.data, { ui: Object.assign({}, cur, ui) }) });
+      }
+      if ("display" in ui) {
+        const disp = normDisplay(ui.display), keep = {}, wins = prev.wins || {};
+        if (disp) disp.windows.forEach((w) => { if (wins[w.id]) keep[w.id] = wins[w.id]; });
+        else if (wins.main) keep.main = wins.main;
+        Object.assign(patch, { display: null, wins: keep, geo: null,
+          front: disp && disp.windows.some((w) => w.id === prev.front) ? prev.front : null });
+      }
+      UNDO_MIRRORS.forEach((m) => { if (m[0] in ui) patch[m[1]] = null; });
+      if ("benchmark" in ui) patch.benchSaved = false;
+      return merge(prev, patch);
+    }
     default: return prev;
   }
 };
@@ -903,12 +1142,16 @@ const tickWindows = (prev, next) => {
     const own = prev.wins[id] || WIN_INITIAL;
     const fade = own.alertMsg && !own.alertBusy && !own.focusTicker &&
       !(prev.tick + 1 - own.alertMsgTick < 3);   // on the 3rd tick after it
+    // 13.6: an ok note message ("saved…") goes the same way; an error stays
+    const noteFade = own.noteMsg && !own.noteBusy && String(own.noteMsg).indexOf("error") !== 0 &&
+      !(prev.tick + 1 - (own.noteMsgTick || 0) < 3);
     const rot = own.hover ? own.rot : own.rot + 1;
-    wins[id] = merge(own, { rot: rot, rotBase: firstData ? rot : own.rotBase, alertMsg: fade ? null : own.alertMsg });
+    wins[id] = merge(own, { rot: rot, rotBase: firstData ? rot : own.rotBase, alertMsg: fade ? null : own.alertMsg,
+      noteMsg: noteFade ? null : own.noteMsg || null });
   });
   return merge(next, { wins: wins });
 };
-const SHARED_EVENTS = { SET_DISPLAY: true, GEO: true, FRONT: true, RESET_LOOK: true };
+const SHARED_EVENTS = { SET_DISPLAY: true, GEO: true, FRONT: true, RESET_LOOK: true, UNDO_APPLIED: true };   // (UNDO_APPLIED 13.6: it may drop windows)
 // An event with a string `w` (every event from a window's render) runs on that
 // window's view: the shared state plus wins[w]; its WIN_KEYS go back to
 // wins[w], the rest to the shared state. Events without `w` run on the shared state.
@@ -1057,6 +1300,16 @@ const rowFlex = css`
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+`;
+// 13.6: the goal line's progress bar (LAYOUT_K.GOAL_BAR wide with its margin)
+const goalBar = css`
+  display: inline-block;
+  width: 40px;
+  height: 4px;
+  margin: 0 0 1px 6px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(var(--pw-fg), 0.12);
 `;
 
 const cols = css`
@@ -1493,7 +1746,8 @@ function onGestureUp() {
     }
     if (g.disp) return saveDisplay(patchWin(g.disp, g.id, { x: g.next.x, y: g.next.y }), g.dispatch);   // a window of _settings.display
     g.dispatch({ type: "SET_POS", pos: g.next });
-    run(helper(["setting", "position", g.next.x + "," + g.next.y])).catch(() => {});
+    const gd = g.dispatch;
+    run(helper(["setting", "position", g.next.x + "," + g.next.y])).then((out) => offerUndo(out, gd)).catch(() => {});
   } else {
     // back where it started: only the draft goes. Otherwise ONE save of the
     // window's spot (a window at the default spot now stays at its left/top)
@@ -1533,7 +1787,7 @@ const startGesture = (ev, kind, dispatch, pos, s, fr) => {
 const resetPos = (dispatch, fr) => {
   if (fr && fr.disp) return saveDisplay(patchWin(fr.disp, fr.id, { x: undefined, y: undefined }), dispatch);
   dispatch({ type: "SET_POS", pos: false });
-  run(helper(["setting", "position", "default"])).catch(() => {});
+  run(helper(["setting", "position", "default"])).then((out) => offerUndo(out, dispatch)).catch(() => {});
 };
 // double-click a grip: back to 664 wide (right edge), fit content (bottom
 // edge), or both (corner). The 12.11 window already is both: nothing to do
@@ -2280,9 +2534,25 @@ const Heatmap = ({ positions, range, w, h, onSelect, d }) => {
         }}>{sr.name}</div>
       );
     }
-    const inner = squarify(
-      sr.positions.map((p) => Object.assign({}, p, { value: p.value || 0 })),
-      sr.x, sr.y + headerH, sr.w, sr.h - headerH);
+    const items = sr.positions.map((p) => Object.assign({}, p, { value: p.value || 0 }));
+    let inner = squarify(items, sr.x, sr.y + headerH, sr.w, sr.h - headerH);
+    // 13.6: two or more slivers (too thin for a ticker) in a sector become one "+n" tile
+    const thin = inner.filter((r) => !(r.w > LAYOUT_K.SLIVER_W && r.h > LAYOUT_K.SLIVER_H));
+    if (thin.length >= 2 && thin.length < inner.length) {
+      const gone = {};
+      thin.forEach((r) => { gone[r.ticker] = true; });
+      const val = thin.reduce((a, r) => a + (r.value || 0), 0);
+      const chg = val > 0 ? thin.reduce((a, r) => a + changeFor(r, range) * (r.value || 0), 0) / val
+        : thin.reduce((a, r) => a + changeFor(r, range), 0) / thin.length;
+      const vs = thin.filter((r) => isNumber(r.volScore) && r.volScore > 0);
+      const changes = {};
+      changes[range] = chg;
+      const others = { ticker: "+" + thin.length, others: thin.map((r) => r.ticker), value: val,
+        weightPct: Math.round(thin.reduce((a, r) => a + (Number(r.weightPct) || 0), 0) * 10) / 10,
+        changes: changes, dayChangePct: chg, plPct: null,
+        volScore: vs.length ? Math.round(vs.reduce((a, r) => a + r.volScore, 0) / vs.length) : 0 };
+      inner = squarify(items.filter((p) => !gone[p.ticker]).concat([others]), sr.x, sr.y + headerH, sr.w, sr.h - headerH);
+    }
     for (const r of inner) {
       const chg = changeFor(r, range);
       const minSide = Math.min(r.w, r.h);
@@ -2290,28 +2560,33 @@ const Heatmap = ({ positions, range, w, h, onSelect, d }) => {
       const showSub = r.w > 40 && r.h > 30;
       const tickerFs = Math.max(8, Math.min(16, minSide * 0.24));
       const subFs = Math.max(7.5, Math.min(11, minSide * 0.16));
-      const bk = isDrift ? bucketFor(d, r.targetKey) : null;
-      let tip = r.ticker + "  " + (isDrift ? driftTip(bk) : isVol ? "volatility " + (r.volPct === null ? "—" : r.volPct + "%/yr") : pct(chg) + " (" + range + ")") +
+      const bk = isDrift && !r.others ? bucketFor(d, r.targetKey) : null;
+      // 13.6: a ticker-only tile wide enough for the change too shows both on one row
+      const oneRow = showTicker && !showSub && r.w >= (String(r.ticker).length + 7) * subFs * 0.62 + 6;
+      let tip = r.others ? plural(r.others.length, "small holding") + ": " + r.others.join(", ") +
+        "\n" + money(r.value) + " · " + r.weightPct + "% of portfolio" +
+        (isVol ? "\naverage volatility score " + r.volScore + "/10" : "\ntogether " + pct(chg) + " (" + (isDrift ? "1D" : range) + ")")
+        : r.ticker + "  " + (isDrift ? driftTip(bk) : isVol ? "volatility " + (r.volPct === null ? "—" : r.volPct + "%/yr") : pct(chg) + " (" + range + ")") +
         "\n" + money(r.value) + " · " + r.weightPct + "% of portfolio" +
         (r.volScore ? "\nvolatility score " + r.volScore + "/10 (" + VOL_LABEL[r.volScore] + ")" : "");
-      if (r.plPct !== null && r.plPct !== undefined) {
+      if (!r.others && r.plPct !== null && r.plPct !== undefined) {
         tip += "\nP&L " + (r.basisDerived ? "≈" : "") + pct(r.plPct);
       }
-      if (r.undated === true) tip += "\nundated: no purchase date, counted as held for the whole graph";
-      const hi52 = high52Tip(r);
+      if (!r.others && r.undated === true) tip += "\nundated: no purchase date, counted as held for the whole graph";
+      const hi52 = r.others ? null : high52Tip(r);
       if (hi52) tip += "\n" + hi52;
       tiles.push(
-        <div key={r.ticker} title={tip}
-          onClick={onSelect ? () => onSelect(r.ticker) : null}
+        <div key={r.others ? "others:" + sr.name : r.ticker} title={tip} data-pw-map-others={r.others ? r.others.length : undefined}
+          onClick={onSelect && !r.others ? () => onSelect(r.ticker) : null}
           style={{
             position: "absolute",
-            cursor: onSelect ? "pointer" : "default",
+            cursor: onSelect && !r.others ? "pointer" : "default",
             left: (r.x + TILE_GAP) + "px", top: (r.y + TILE_GAP) + "px",
             width: Math.max(0, r.w - TILE_GAP * 2) + "px",
             height: Math.max(0, r.h - TILE_GAP * 2) + "px",
-            background: isDrift ? driftTileColor(bk) : isVol ? volTileColor(r.volScore) : tileColor(chg, range),
+            background: isDrift ? (r.others ? neutralOf() : driftTileColor(bk)) : isVol ? volTileColor(r.volScore) : tileColor(chg, range),
             borderRadius: Math.min(6, Math.max(2, minSide * 0.12)) + "px",
-            display: "flex", flexDirection: "column", alignItems: "center",
+            display: "flex", flexDirection: oneRow ? "row" : "column", columnGap: oneRow ? 3 : undefined, alignItems: "center",
             justifyContent: "center", overflow: "hidden",
             boxShadow: "inset 0 0.5px 0 rgba(var(--pw-fg),0.07)",
           }}>
@@ -2320,7 +2595,7 @@ const Heatmap = ({ positions, range, w, h, onSelect, d }) => {
               color: "var(--pw-tile-ink)", lineHeight: 1.1,
               textShadow: "var(--pw-tile-shadow)" }}>{r.ticker}</div>
           ) : null}
-          {showSub ? (
+          {showSub || oneRow ? (
             <div style={{ fontSize: subFs + "px", fontWeight: 500,
               color: "var(--pw-tile-sub)", lineHeight: 1.2,
               textShadow: "var(--pw-tile-shadow)" }}>
@@ -2898,17 +3173,77 @@ const submitAlert = (state, p, held, dispatch) => {
 };
 const removeAlert = (id, dispatch) => alertCall(["remove", id], dispatch, false);
 
+// 13.6: a note and a price target per stock (holding_meta.py; data.json "notes"
+// = {TICKER: {note, target, side, at}}, absent before 13.6 — nothing then shows).
+// A save's reply is held in notesLocal for NOTES_HOLD_TICKS ticks, so a fetch
+// already under way cannot flash the old note back.
+const NOTES_HOLD_TICKS = 3;
+const notesOn = (d) => !!(d && d.notes && typeof d.notes === "object");
+const notesFresh = (nl, tick) => !!(nl && nl.map && typeof nl.map === "object" &&
+  (tick || 0) - (nl.tick || 0) < NOTES_HOLD_TICKS);
+const noteOf = (state, d, tk) => {
+  if (!tk || !notesOn(d)) return null;
+  const nl = state && state.notesLocal;
+  const local = notesFresh(nl, state && state.tick) && Object.prototype.hasOwnProperty.call(nl.map, tk);
+  const e = (local ? nl.map[tk] : d.notes[tk]) || null;
+  if (!e || typeof e !== "object") return null;
+  const note = typeof e.note === "string" && e.note.trim() ? e.note : null;
+  const target = isFin(e.target) && e.target > 0 ? e.target : null;
+  if (note === null && target === null) return null;
+  return { note: note, target: target, side: e.side === "above" || e.side === "below" ? e.side : null,
+    at: typeof e.at === "string" ? e.at : null };
+};
+const targetGap = (e, p) => {
+  if (!e || e.target === null || e.target === undefined || !p || !isFin(p.price) || !(p.price > 0)) return null;
+  const pct = (e.target / p.price - 1) * 100;
+  return { pct: pct, reached: e.side === "above" ? p.price >= e.target
+    : e.side === "below" ? p.price <= e.target : Math.abs(pct) < 0.05 };
+};
+const gapText = (g) => (g ? (g.reached ? "reached" : num(Math.abs(g.pct), 1) + "% away") : "");
+const noteTip = (e, p) => {
+  if (!e) return "";
+  const lines = [];
+  if (e.note) lines.push("note: " + e.note);
+  if (e.target !== null) {
+    const g = targetGap(e, p);
+    lines.push("price target " + num(e.target, 2) + " " + ((p && p.currency) || "") + (g ? " · " + gapText(g) : ""));
+  }
+  return lines.join("\n");
+};
+const metaCall = (args, ticker, dispatch) => {
+  dispatch({ type: "NOTE_BUSY" });
+  run(helper(["meta"].concat(args)))
+    .then((out) => {
+      const r = parseJson(out) || { error: String(out || "").trim().slice(0, 100) || "could not save the note" };
+      dispatch({ type: "NOTE_RESULT", ok: !r.error, ticker: ticker, entry: r.entry || null,
+        msg: String(r.error ? "error: " + r.error : r.message || "saved").slice(0, 140) });
+    })
+    .catch((e) => dispatch({ type: "NOTE_RESULT", ok: false, msg: "error: " + String(e).slice(0, 80) }));
+};
+const submitNote = (state, p, dispatch) => {
+  if (state.noteBusy || !p || !p.ticker) return;
+  const field = state.noteEdit, tk = p.ticker, t = String(state.noteInput || "").trim();
+  if (field === "note") { metaCall(["note", tk, t], tk, dispatch); return; }
+  if (field !== "target") return;
+  if (!t) { metaCall(["target", tk, "clear"], tk, dispatch); return; }
+  // (1,000 is refused like holding_meta.py does: a thousands separator, not a decimal comma)
+  const v = /^\d+([.,]\d+)?$/.test(t) && !/^[1-9]\d{0,2}(,\d{3})+$/.test(t) ? parseFloat(t.replace(",", ".")) : NaN;
+  if (!(v > 0)) { dispatch({ type: "NOTE_RESULT", ok: false, msg: "error: type a price like 72 or 72.50" }); return; }
+  const side = isFin(p.price) ? (v > p.price ? "above" : v < p.price ? "below" : null) : null;
+  metaCall(["target", tk, String(v)].concat(side ? [side] : []), tk, dispatch);
+};
+
 // a display choice: the screen follows at once (state), then it is saved in
 // _settings; a failed save only means it isn't remembered after a restart
 const savePref = (key, on, dispatch) => {
   dispatch(key === "graphBig" ? { type: "TOGGLE_GRAPH_BIG", on: on }
     : key === "news" ? { type: "SET_NEWS_PREF", on: on } : { type: "SET_SHOW_BENCH", on: on });
-  return runQueued(["setting", key, on ? "true" : "false"]).catch(() => {});
+  return runQueued(["setting", key, on ? "true" : "false"]).then((out) => offerUndo(out, dispatch)).catch(() => {});
 };
 // one line or everything (a title click, 12.11), saved the same way
 const toggleCompact = (on, dispatch) => {
   dispatch({ type: "SET_COMPACT", on: on });
-  return runQueued(["setting", "compact", on ? "true" : "false"]).catch(() => {});
+  return runQueued(["setting", "compact", on ? "true" : "false"]).then((out) => offerUndo(out, dispatch)).catch(() => {});
 };
 // a title click; the second click of a double-click doesn't toggle back, and
 // the click that ends a drag of the title row never gets here (swallowClick)
@@ -2940,7 +3275,7 @@ const exportCsv = (state, dispatch) => {
     const shown = typeof r.dirShown === "string" && r.dirShown ? r.dirShown : "~/Documents/Portfolio";
     const rows = r.rows && typeof r.rows === "object" ? r.rows : {};
     const tip = (Array.isArray(r.files) ? r.files.filter((f) => typeof f === "string").join(", ") : "") +
-      ["holdings", "daily", "sales"].filter((k) => isFin(rows[k])).map((k, i) => (i ? " · " : "\n") + k + " " + rows[k] + " rows").join("");
+      ["holdings", "daily", "sales", "dividends"].filter((k) => isFin(rows[k])).map((k, i) => (i ? " · " : "\n") + k + " " + rows[k] + " rows").join("");
     dispatch({ type: "EXPORT_MSG", text: "exported to " + shown, tip: tip });
     if (revealable(r.path)) run("open -R " + shq(r.path)).catch(() => {});
   }).catch((e) => fail(e && e.message ? e.message : e));
@@ -3049,12 +3384,13 @@ const pickBench = (value, hidden, dispatch) => {
   // positions.json / data.json, and one would undo the other's change
   const show = hidden && v !== "none";
   if (show) dispatch({ type: "SET_SHOW_BENCH", on: true });
-  const saveShow = () => (show ? runQueued(["setting", "showBenchmark", "true"]).catch(() => {}) : null);
+  // (each run offers its undo; showBenchmark's is the newest record, so it comes last)
+  const saveShow = () => (show ? runQueued(["setting", "showBenchmark", "true"]).then((out) => offerUndo(out, dispatch)).catch(() => {}) : null);
   return runQueued(["setting", "benchmark", v])
     .then((out) => {
       const r = parseJson(String(out).trim());
       if (!r || r.error) dispatch({ type: "BENCH_FAIL", msg: (r && r.error) || "could not save the index" });
-      else dispatch({ type: "BENCH_SAVED", value: v });
+      else { dispatch({ type: "BENCH_SAVED", value: v }); offerUndo(out, dispatch); }
     }, () => dispatch({ type: "BENCH_FAIL", msg: "could not save the index" }))
     .then(saveShow);
 };
@@ -3152,7 +3488,7 @@ const BenchPicker = ({ want, cur, hidden, state, dispatch }) => {
   );
 };
 
-// 13.5: the first buy over the demo portfolio offers to replace the 22 demo
+// 13.5: the first buy over the demo portfolio offers to replace the demo
 // holdings first (sell --reset-all prints plain text, so it is its own run)
 const demoOffered = (pending, demoKind) => demoKind === "example" && !!pending && pending.kind === "buy";
 // data.json's demoKind, except "example" stops counting once a buy or import over
@@ -3162,10 +3498,14 @@ const demoKindOf = (state, d) => (d.demoKind === "example" && state.demoSettled 
 // --if-demo: the helper re-checks positions.json and removes nothing once the
 // owner's own holdings are in it (13.5; not for the explicit "start fresh")
 const DEMO_RESET = helper(["sell", "--reset-all", "--if-demo"]);
-const confirmPending = (pending, dispatch, demoKind) => executePending(pending, dispatch,
+// 13.6: how many demo holdings there are (data.json, while demoKind is "example"; 0 = unknown)
+const demoNOf = (d) => (d && d.demoKind === "example" && Array.isArray(d.positions) ? d.positions.length : 0);
+const demoWord = (n) => (n ? "the " + n + " demo holdings" : "the demo holdings");
+const demoNow = (state) => demoNOf(state && state.raw && state.raw.data);
+const confirmPending = (pending, dispatch, demoKind, demoN) => executePending(pending, dispatch,
   demoOffered(pending, demoKind) && pending.demoReplace !== false ? DEMO_RESET : null,
-  demoOffered(pending, demoKind));
-const DEMO_KEPT = "the 22 demo holdings are still in the list — sell removes them (ticker, then 'all')";
+  demoOffered(pending, demoKind), demoN);
+const demoKept = (n) => "; " + demoWord(n) + " stay (sell removes them)";
 const DEMO_GONE = " — the demo holdings were already removed (a backup of the file is kept)";
 const errText = (e) => String((e && e.message) || e);
 // pre (clearing the demo holdings) first, then cmd; a failed cmd after it carries afterPre
@@ -3174,7 +3514,7 @@ const runAfter = (pre, cmd) => (!pre ? run(cmd) : run(pre).then((o) => {
   if (/^error/i.test(t)) throw new Error(t.replace(/^error:\s*/i, ""));
   return run(cmd).catch((e) => { const err = new Error(errText(e)); err.afterPre = true; throw err; });
 }));
-const executePending = (pending, dispatch, pre, offered) => {
+const executePending = (pending, dispatch, pre, offered, demoN) => {
   dispatch({ type: "CLEAR_PENDING" });
   say(dispatch, "working…");
   runAfter(pre, pending.cmd)
@@ -3186,13 +3526,13 @@ const executePending = (pending, dispatch, pre, offered) => {
       // helper's own line stays on hover
       if (ok && pending.kind === "buy") {
         say(dispatch, "added " + fmtShares(pending.shares) + " × " + pending.ticker +
-          " — it shows in the list after the next refresh (about a minute)" +
-          (pre ? " — the demo holdings were replaced (a backup of the file is kept)" : offered ? "; " + DEMO_KEPT : ""),
+          " — in the list within a minute" +
+          (pre ? " (demo holdings replaced, backup kept)" : offered ? demoKept(demoN) : ""),
           { tip: msg, tone: "amber" });
         dispatch({ type: "JUST_ADDED", ticker: pending.ticker });
       } else if (ok && pending.kind === "sell") {
         say(dispatch, "sold " + (pending.shares === "all" ? "all of " : fmtShares(pending.shares) + " × ") + pending.ticker +
-          " — the list updates after the next refresh (about a minute)", { tip: msg, tone: "amber" });
+          " — the list catches up within a minute", { tip: msg, tone: "amber" });
       } else say(dispatch, (msg.slice(0, 140) || "done") + (!ok && pre ? DEMO_GONE : ""));
       if (pending.reset && ok) dispatch({ type: "FORM_RESET" });
     })
@@ -3243,9 +3583,9 @@ const Suggestions = ({ state, dispatch }) => {
 
 // 13.5: the demo holdings on the first buy or import — replace them (the
 // default; sell --reset-all keeps a backup, the settings and the cash) or keep them
-const DemoReplaceChips = ({ replace, pick }) => (
+const DemoReplaceChips = ({ replace, pick, n }) => (
   <div className={welcomeLine} style={{ marginTop: 4, fontSize: 9 }} data-pw-demo-offer="1">
-    <span style={edDim}>the 22 demo holdings:</span>
+    <span style={edDim}>{demoWord(n) + ":"}</span>
     <span className={replace ? css`${tabBtn} ${tabActive}` : tabBtn} data-pw-demo-replace="replace"
       title="clear the demo holdings first, then add yours (a backup of the file is kept; your settings and cash stay)"
       onClick={() => pick(true)}>replace them (recommended)</span>
@@ -3310,17 +3650,17 @@ const AddFormMain = ({ state, dispatch, empty, positions, demoKind }) => (
         ref={focusOnce}
         onKeyDown={(ev) => {
           if (ev.repeat) return;    // a held Return must not confirm what it just asked
-          if (isEnter(ev)) confirmPending(state.pendingAction, dispatch, demoKind);
+          if (isEnter(ev)) confirmPending(state.pendingAction, dispatch, demoKind, demoNow(state));
           else if (isEscape(ev)) dispatch({ type: "CLEAR_PENDING" });
         }}>
         <div className={css`${mono} font-size:9px; color:${C.amber}; line-height:1.4;`}>{state.pendingAction.label}</div>
         {demoOffered(state.pendingAction, demoKind) ? (
-          <DemoReplaceChips replace={state.pendingAction.demoReplace !== false}
+          <DemoReplaceChips replace={state.pendingAction.demoReplace !== false} n={demoNow(state)}
             pick={(on) => dispatch({ type: "PENDING_SET", patch: { demoReplace: on } })} />
         ) : null}
         <div style={{ marginTop: 4, textAlign: "right" }}>
           <span className={css`${tabBtn} ${tabActive}`} data-pw-add-confirm="1" title="Return also confirms"
-            onClick={() => confirmPending(state.pendingAction, dispatch, demoKind)}>confirm</span>
+            onClick={() => confirmPending(state.pendingAction, dispatch, demoKind, demoNow(state))}>confirm</span>
           <span className={tabBtn} data-pw-add-cancel="1" title="Esc also cancels"
             onClick={() => dispatch({ type: "CLEAR_PENDING" })}>cancel</span>
         </div>
@@ -3329,7 +3669,8 @@ const AddFormMain = ({ state, dispatch, empty, positions, demoKind }) => (
       <div key="line" className={rowFlex} style={{ marginTop: 6 }}>
         <span className={css`${mono} font-size:8.5px; max-width: 150px; line-height:1.4;`} data-pw-add-msg="1"
           title={state.addMsgTip || undefined}
-          style={{ color: state.addMsgTone === "amber" && state.tick - state.addMsgTick < 2 ? C.amber : C.dim }}>
+          style={state.addMsgTone === "amber" && state.tick - state.addMsgTick < 2
+            ? { color: C.amber, flex: "1 1 150px", maxWidth: "none" } : { color: C.dim }}>
           {state.addMsg || (empty ? "add your first holding — any stock Yahoo Finance lists" : "any stock, ETF or crypto on Yahoo Finance")}
         </span>
         <span style={{ whiteSpace: "nowrap" }}>
@@ -3389,8 +3730,12 @@ const welcomeLine = css`
   min-width: 0;
 `;
 // (a row's note may wrap onto a line of its own: one more line per note)
+// (13.6: plus the column header line above the rows)
+// 13.6: the preview's columns (8.5 px mono): 4 columns + gaps = 240 px, so a row fits a
+// 320 px window; the note sits beside the row or on a line of its own
+const IMPORT_COLS = { stock: 56, shares: 40, price: 58, date: 62, gap: 6 };
 const importH = (st) => (st.imp && st.imp.open ? LAYOUT_K.IMPORT + ((st.imp.rows || []).slice(0, 12)
-  .reduce((n, r) => n + 1 + (r && r.note ? 1 : 0), 0)) * LAYOUT_K.ROW_LINE : 0);
+  .reduce((n, r) => n + 1 + (r && r.note ? 1 : 0), (st.imp.rows || []).length ? 1 : 0)) * LAYOUT_K.ROW_LINE : 0);
 const openImport = (state, dispatch) => {
   if (!state.showAdd) dispatch({ type: "TOGGLE_ADD" });
   dispatch({ type: "IMPORT_SET", imp: { open: true, rows: null, msg: null, busy: false } });
@@ -3412,7 +3757,7 @@ const importPreview = (state, dispatch) => {
 const importCommit = (state, dispatch, demoKind) => {
   const imp = state.imp || IMPORT_EMPTY;
   // 13.5: over the demo portfolio, the demo holdings go first unless "keep them"
-  const offered = demoKind === "example", replace = offered && imp.demoReplace !== false;
+  const offered = demoKind === "example", replace = offered && imp.demoReplace !== false, demoN = demoNow(state);
   dispatch({ type: "IMPORT_SET", imp: { busy: true, msg: "adding…" } });
   runAfter(replace ? DEMO_RESET : null, helper(["import", "commit"].concat(importArgs(imp)))).then((out) => {
     const r = parseJson(String(out).trim());
@@ -3424,7 +3769,7 @@ const importCommit = (state, dispatch, demoKind) => {
     const n = r.added || 0, k = r.skipped || 0;
     say(dispatch, "added " + plural(n, "holding") + (k ? " (" + plural(k, "line") + " skipped)" : "") +
       " — prices come with the next refresh" + (r.backup ? "; the old file is kept as a backup" : "") +
-      (replace ? " — the demo holdings were replaced" : offered ? "; " + DEMO_KEPT : ""));
+      (replace ? " (demo holdings replaced)" : offered ? demoKept(demoN) : ""));
   }, (e) => {
     if (replace && /nothing removed/.test(errText(e))) dispatch({ type: "DEMO_SETTLED" });
     dispatch({ type: "IMPORT_SET", imp: { busy: false,
@@ -3472,14 +3817,21 @@ const ImportPanel = ({ state, dispatch, demoKind }) => {
       {rows.length ? (
         <div className={css`${mono} font-size:8.5px; margin-top:4px;`} data-pw-import-rows={rows.length}>
           <div style={{ color: C.dim }}>{plural(okN, "holding") + " found" + (skipN ? " · " + plural(skipN, "line") + " skipped" : "")}</div>
+          <div className={rowFlex} data-pw-import-head="1" style={{ color: C.dim, columnGap: IMPORT_COLS.gap, justifyContent: "flex-start", overflow: "hidden" }}>
+            <span style={{ width: IMPORT_COLS.stock, flex: "none" }}>stock</span>
+            <span style={{ width: IMPORT_COLS.shares, flex: "none", textAlign: "right" }}>shares</span>
+            <span style={{ width: IMPORT_COLS.price, flex: "none", textAlign: "right" }} title="what you paid per share — none = that day's close">price</span>
+            <span style={{ width: IMPORT_COLS.date, flex: "none" }}>date</span>
+            <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>note</span>
+          </div>
           {shown.map((r, i) => (
             <div key={i} className={rowFlex} data-pw-import-row={i}
-              style={{ color: r.ok ? C.ink : C.dim, columnGap: 8, justifyContent: "flex-start", flexWrap: "wrap" }}
+              style={{ color: r.ok ? C.ink : C.dim, columnGap: IMPORT_COLS.gap, justifyContent: "flex-start", flexWrap: "wrap" }}
               title={(r.note ? (r.ok ? "" : "line " + r.line + ": ") + r.note + "\n" : "") + (r.text || "")}>
-              <span style={{ width: 64, flex: "none", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.ticker || "—"}</span>
-              <span style={{ width: 54, flex: "none", textAlign: "right" }}>{r.ok ? fmtShares(r.shares) : ""}</span>
-              <span style={{ width: 72, flex: "none", textAlign: "right" }}>{r.ok ? (r.cost != null ? num(r.cost, 2) : "day's close") : ""}</span>
-              <span style={{ width: 70, flex: "none" }}>{r.ok ? (r.date || "today") : ""}</span>
+              <span style={{ width: IMPORT_COLS.stock, flex: "none", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: r.ok ? undefined : C.amber }}>{r.ticker || "—"}</span>
+              <span style={{ width: IMPORT_COLS.shares, flex: "none", textAlign: "right", whiteSpace: "nowrap" }}>{r.ok ? fmtShares(r.shares) : ""}</span>
+              <span style={{ width: IMPORT_COLS.price, flex: "none", textAlign: "right", whiteSpace: "nowrap" }}>{r.ok ? (r.cost != null ? num(r.cost, 2) : "day's close") : ""}</span>
+              <span style={{ width: IMPORT_COLS.date, flex: "none", whiteSpace: "nowrap" }}>{r.ok ? (r.date || "today") : ""}</span>
               {r.note ? (
                 // the reason: beside the row when it fits, else on a line of its own below it
                 <span data-pw-import-note="1" style={{ color: r.ok ? C.dim : C.amber, flex: "1 1 150px", minWidth: 0, lineHeight: 1.35 }}>
@@ -3491,7 +3843,7 @@ const ImportPanel = ({ state, dispatch, demoKind }) => {
         </div>
       ) : null}
       {demoKind === "example" && rows.length && okN ? (
-        <DemoReplaceChips replace={imp.demoReplace !== false}
+        <DemoReplaceChips replace={imp.demoReplace !== false} n={demoNow(state)}
           pick={(on) => dispatch({ type: "IMPORT_SET", imp: { demoReplace: on } })} />
       ) : null}
       <div className={rowFlex} style={{ marginTop: 6 }}>
@@ -3769,7 +4121,7 @@ const StockDetail = ({ p, earn, look, range, dispatch, tg, chartW }) => {   // t
             <span>{p.shares} sh · {money(p.value)} · {p.weightPct}%</span>
           </div>
           {tg ? (
-            <div className={css`${statRow} ${mono}`} title={"_settings.targets — ±" + tg.band + " pt band"}>
+            <div className={css`${statRow} ${mono}`} title={"target mix — ±" + tg.band + " pt band"}>
               <span style={{ color: C.dim }}>{tg.kind === "sector" ? tg.key + " sector" : "target"}</span>
               <span>
                 {fmtTarget(tg.targetPct) + " · drift "}
@@ -3859,6 +4211,44 @@ const pct1 = (v) => {
 const num2 = (v) => (isFin(v) ? num(Math.round(v * 100) / 100 || 0, 2).replace(/^-/, "−") : "—");
 // the header's return line is shown only when the tracker says the history is complete
 const perfShown = (perf) => !!(perf && perf.ok === true && isFin(perf.totalPct));
+// 13.6: the goal (⚙ → Portfolio → a goal to reach; data.json ui.goal). The
+// projection grows the holdings at the annual return so far (XIRR) and keeps
+// cash flat, and only after GOAL_MIN_DAYS of history; every read is guarded
+const GOAL_MIN_DAYS = 365;
+const goalOf = (d) => {
+  const g = d && d.ui && d.ui.goal;
+  if (!g || typeof g !== "object" || !isFin(g.value) || !(g.value > 0) ||
+    typeof g.date !== "string" || !/^\d{4}-\d\d-\d\d$/.test(g.date)) return null;
+  return { value: g.value, date: g.date, cur: g.cur || d.currency };
+};
+const goalView = (d) => {
+  const g = goalOf(d);
+  if (!g) return null;
+  const factor = g.cur === d.currency ? 1
+    : d.fxRates && isFin(d.fxRates[g.cur]) ? d.fxRates[g.cur] : null;
+  if (factor === null) return { g: g, noRate: true };
+  const goal = g.value * factor;
+  const now = (d.totals && d.totals.value) || 0;
+  const cash = isFin(d.cash) ? d.cash : 0;
+  const today = isoOf(Date.now() / 1000);
+  const years = (Date.parse(g.date) - Date.parse(today)) / (365.25 * 864e5);
+  const pctNow = Math.floor(now / goal * 100);
+  const reached = now >= goal, passed = g.date <= today;
+  const perf = d.performance && typeof d.performance === "object" ? d.performance : null;
+  let proj = null, onTrack = null, shortPct = null, need = null, why = null;
+  if (!reached && !passed && perfShown(perf) && isFin(perf.xirrPct) && isFin(perf.days) && perf.days >= GOAL_MIN_DAYS) {
+    const r = perf.xirrPct / 100;
+    proj = Math.max(0, now - cash) * Math.pow(1 + r, years) + cash;
+    onTrack = proj >= goal;
+    shortPct = Math.ceil((goal - proj) / goal * 100);
+    need = now - cash > 0 && goal > cash ? (Math.pow((goal - cash) / (now - cash), 1 / years) - 1) * 100 : null;
+  } else why = perfShown(perf) && isFin(perf.days) && perf.days < GOAL_MIN_DAYS ? "young" : "norate";
+  return { g: g, goal: goal, now: now, cash: cash, pctNow: pctNow, reached: reached, passed: passed, proj: proj,
+    onTrack: onTrack, shortPct: shortPct, need: need, why: why, xirr: perf && perf.xirrPct, since: perf && perf.since };
+};
+// "2035" for a year alone (Dec 31), else "Jun 2035"
+const byLabel = (iso) => (/-12-31$/.test(iso) ? iso.slice(0, 4)
+  : new Date(iso + "T12:00:00").toLocaleDateString(LOCALE, { month: "short", year: "numeric" }));
 // hover line for a holding: "52-week closing high 181.20 USD (Mar 3) · −4.20% from it"; "" when absent
 const high52Tip = (p) => {
   if (!p || !isFin(p.high52)) return "";
@@ -3906,6 +4296,10 @@ const exDivTip = (e) => "ex-dividend date — own the shares before it to get th
   (isFin(e.value) ? "\n≈ " + money(e.value, true) + " for the shares you hold" : "");
 
 const SALES_ROWS = 5;
+const CUR_ROWS = 6;   // 13.6: currencies panel rows before "+N more"
+// why the currency move since purchase is not known (currencies.why / rows[].why)
+const WHY_TXT = { undated: "needs a purchase date on every holding in this currency", cost: "a holding has no purchase price",
+  loading: "older exchange rates are still loading", norate: "no exchange-rate history yet" };
 const SalesPanel = ({ d, totals, expanded, dispatch, first, pw }) => {
   const sales = Array.isArray(d.sales) ? d.sales.filter((s) => s && typeof s.ticker === "string") : [];
   if (sales.length === 0) return null;
@@ -3971,14 +4365,120 @@ const monthOf = (m) => {   // "2026-09" -> Date in that month
   const mm = /^(\d{4})-(\d\d)$/.exec(typeof m === "string" ? m : "");
   return mm ? new Date(Number(mm[1]), Number(mm[2]) - 1, 15, 12) : null;
 };
+// 13.6: the income panel's views. "bars" always works; "next" and "years" need
+// data.json's dividends.upcoming / .years (absent from 13.5's data: no switch then)
+const INCOME_NEXT_ROWS = 4;
+const incomeViews = (dv) => ({ next: !!dv && Array.isArray(dv.upcoming), years: !!dv && Array.isArray(dv.years) });
+const incomeViewOf = (state, dv) => {
+  const ok = incomeViews(dv);
+  const v = state.incomeView;
+  return (v === "next" && ok.next) || (v === "years" && ok.years) ? v : "bars";
+};
+const incomeNext = (dv) => (dv && Array.isArray(dv.upcoming) ? dv.upcoming : [])
+  .filter((e) => e && typeof e.ticker === "string" && typeof e.exDate === "string");
+const incomeYears = (dv) => (dv && Array.isArray(dv.years) ? dv.years : []).filter((y) => y && isFin(y.y));
+// the panel's height below the eyebrow, per view (est["panel.income"])
+const incomeH = (dv, view, K) => {
+  const ok = incomeViews(dv);
+  let h = K.INCOME + (ok.next || ok.years ? K.INCOME_TABS : 0);
+  if (view === "bars") return h;
+  let body;
+  if (view === "next") {
+    const n = incomeNext(dv).length;
+    body = n ? Math.min(n, INCOME_NEXT_ROWS) * K.INCOME_ROW + (n > INCOME_NEXT_ROWS ? K.INCOME_ROW : 0) : K.INCOME_ROW;
+  } else {
+    const early = dv && isFin(dv.receivedEarlier) && dv.receivedEarlier > 0 ? 1 : 0;
+    body = Math.max(1, incomeYears(dv).length + early) * K.INCOME_ROW;
+  }
+  return h - K.INCOME_BARS + 3 + body;
+};
+const INCOME_TABS = [
+  { key: "bars", label: "12 months", tip: "the next 12 months, estimated from the last year of payments × the shares you hold now" },
+  { key: "next", label: "next dates", tip: "the next ex-dividend dates: own the shares before that day to get the payment; expected = not announced yet, about a year after last year's" },
+  { key: "years", label: "by year", tip: "dividends your shares earned in each calendar year (by ex-dividend date), at today's exchange rate" },
+];
+// "next": the soonest ex-dividend dates of holdings (dv.upcoming, 90 days)
+const incomeNextTip = (e) => {
+  const per = isFin(e.perShare) ? "\n" + num(e.perShare, e.perShare < 0.1 ? 4 : 2) + " " + (e.currency || "") +
+    " per share" + (e.est ? " (last year's)" : " (the last payment)") : "";
+  return (e.est ? "expected — about a year after last year's payment; the company has not announced it yet"
+    : "ex-dividend date — own the shares before it to get the payment") +
+    (e.payDate ? "\npaid on " + fmtIsoY(e.payDate) : "") + per +
+    (isFin(e.amount) ? "\nabout " + money(e.amount, true) + " for the shares you hold" : "");
+};
+const incomeNextRows = (dv, line, dim) => {
+  const all = incomeNext(dv);
+  const rest = all.slice(INCOME_NEXT_ROWS);
+  return (
+    <div style={{ marginTop: 3 }}>
+      {all.length ? all.slice(0, INCOME_NEXT_ROWS).map((e, i) => (
+        <div key={e.ticker + "|" + e.exDate + "|" + i} className={rowFlex + " " + line} style={{ marginTop: i ? 2 : 0 }}
+          data-pw-incrow="next" title={incomeNextTip(e)}>
+          <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <span style={{ color: C.dim }}>{fmtIsoY(e.exDate) + " "}</span>{e.ticker}
+            <span style={{ color: C.dim }}>{e.payDate ? " · paid " + fmtIsoY(e.payDate) : e.est ? " · expected" : ""}</span>
+          </span>
+          <span style={{ whiteSpace: "nowrap", marginLeft: 6 }}>{isFin(e.amount) ? "~" + money(e.amount, true) : "—"}</span>
+        </div>
+      )) : <div className={dim}>no ex-dividend dates known for the next 90 days</div>}
+      {rest.length ? (
+        <div className={dim} style={{ marginTop: 2 }}
+          title={rest.map((e) => e.ticker + " " + fmtIsoY(e.exDate)).join("\n")}>
+          {"+" + rest.length + " more in the next 90 days"}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+// "years": received per calendar year of the ex-date (dv.years, newest first)
+const incomeYearRows = (dv, line, dim) => {
+  const ys = incomeYears(dv);
+  const top = ys.reduce((mx, y) => Math.max(mx, isFin(y.received) ? y.received : 0), 0);
+  const early = isFin(dv.receivedEarlier) && dv.receivedEarlier > 0 ? dv.receivedEarlier : 0;
+  const oldest = ys.length ? ys[ys.length - 1].y : null;
+  return (
+    <div style={{ marginTop: 3 }}>
+      {ys.length ? ys.map((y, i) => {
+        const r = isFin(y.received) ? y.received : 0;
+        const w = top > 0 && r > 0 ? "max(1px, " + Math.round((r / top) * 1000) / 10 + "%)" : 0;
+        const n = isFin(y.payers) ? y.payers : 0;
+        return (
+          <div key={y.y} className={rowFlex + " " + line} style={{ marginTop: i ? 2 : 0 }} data-pw-incrow="year"
+            title={y.y + ": " + money(r, true) + " from " + n + (n === 1 ? " holding" : " holdings")}>
+            <span style={{ whiteSpace: "nowrap" }}>{y.y + (y.ytd ? " so far" : "")}</span>
+            <span style={{ flex: 1, margin: "0 6px", height: 3, alignSelf: "center", display: "flex" }}>
+              <span style={{ width: w, height: 3, background: C.line, opacity: 0.8 }} />
+            </span>
+            <span style={{ whiteSpace: "nowrap" }}>{money(r)}
+              <span style={{ color: C.dim }}>{n ? " · " + n + (n === 1 ? " payer" : " payers") : ""}</span>
+            </span>
+          </div>
+        );
+      }) : <div className={dim}>received dividends need purchase dates — add the date you bought each holding</div>}
+      {early && oldest !== null ? (
+        <div className={rowFlex + " " + dim} style={{ marginTop: 2 }} data-pw-incrow="year">
+          <span>{"before " + oldest}</span><span>{money(early)}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+};
 const INCOME_BAR_H = 22;
-const IncomePanel = ({ d, first, pw }) => {
+const IncomePanel = ({ d, view, dispatch, first, pw }) => {
   const dv = d.dividends;
   if (!dv || typeof dv !== "object" || Array.isArray(dv)) return null;
   const months = (Array.isArray(dv.months) ? dv.months : []).slice(0, 12)
     .map((b) => ({ m: b && b.m, amount: b && isFin(b.amount) && b.amount > 0 ? b.amount : 0 }));
   const top = months.reduce((mx, b) => Math.max(mx, b.amount), 0);
   const fallback = Array.isArray(dv.fallback) ? dv.fallback.filter((t) => typeof t === "string") : [];
+  const ok = incomeViews(dv);
+  const v = view === "next" && ok.next ? "next" : view === "years" && ok.years ? "years" : "bars";
+  // read at render time (the theme can change); dimMono lives in renderWin only
+  const incSwitch = css`${mono} font-size:8px; color:${C.dim};`;
+  const incLine = css`${mono} font-size:9px;`;
+  const incDim = css`${mono} font-size:8px; color:${C.dim};`;
+  const incNextBody = v === "next" ? incomeNextRows(dv, incLine, incDim) : null;
+  const incYearsBody = v === "years" ? incomeYearRows(dv, incLine, incDim) : null;
   return (
     <div className={first ? "" : sectionGap} {...(pw || {})}>
       <div className={rowFlex}>
@@ -3994,7 +4494,19 @@ const IncomePanel = ({ d, first, pw }) => {
         {" · on cost "}{isFin(dv.yieldOnCostPct) ? num(dv.yieldOnCostPct, 2) + "%" : "—"}
         {isFin(dv.payers) ? " · " + dv.payers + (dv.payers === 1 ? " payer" : " payers") : ""}
       </div>
-      {months.length ? (
+      {ok.next || ok.years ? (
+        <div className={incSwitch} style={{ marginTop: 3, height: 11, lineHeight: "11px", whiteSpace: "nowrap" }}>
+          {INCOME_TABS.filter((t) => t.key === "bars" || ok[t.key]).map((t, i) => (
+            <span key={t.key}>
+              {i ? " | " : ""}
+              <span className={linkBtn} style={{ fontSize: 8, color: v === t.key ? C.ink : C.dim }}
+                data-pw-income={t.key} title={t.tip}
+                onClick={() => dispatch && dispatch({ type: "SET_INCOME_VIEW", view: t.key })}>{t.label}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {v === "next" ? incNextBody : v === "years" ? incYearsBody : months.length ? (
         <div style={{ display: "flex", alignItems: "flex-end", marginTop: 5 }}>
           {months.map((b, i) => {
             const dt = monthOf(b.m);
@@ -4019,12 +4531,85 @@ const IncomePanel = ({ d, first, pw }) => {
         <div className={css`${mono} font-size: 8.5px; color: ${C.dim};`} style={{ marginTop: 3 }}
           title={"dividends paid on the shares you held before each ex-dividend date" +
             (dv.receivedPartial ? "\nholdings without a purchase date are not counted (their start is unknown)" : "") +
-            "\nshares you have since sold are not counted"}>
+            "\nholdings you sold completely, and sales recorded before 12.7, are not counted"}>
           received <span style={{ color: C.ink }}>{money(dv.received)}</span>
           {typeof dv.receivedSince === "string" ? " since " + fmtIsoY(dv.receivedSince) : ""}
           {dv.receivedPartial === true ? " · dated lots only" : ""}
         </div>
       ) : null}
+    </div>
+  );
+};
+
+// ------------------------------------------------------------------ currencies (13.6)
+// d.currencies (portfolio_tracker.currency_exposure): each currency's share of
+// the portfolio (cash included) and what currency moves did today and since
+// each purchase. Stateless: hover tooltips only.
+const curTipOf = (r, cx) => {
+  const own = r.iso === cx.display;
+  return [
+    r.iso + ": " + num(r.pct, 1) + "% of the portfolio" +
+      (r.holdings ? " · " + r.holdings + (r.holdings === 1 ? " holding" : " holdings") : "") +
+      (r.cash ? " · " + money(r.cash) + " cash" : ""),
+    own ? "your display currency, so currency moves don't change it"
+      : "1 " + r.iso + " = " + num(r.rate, 4) + " " + cx.display + " today (" + pct(r.rateDayPct) + ")",
+    "today: prices " + signedMoney(r.dayPrice) + (own ? "" : " · currency move " + signedMoney(r.dayFx)),
+    "since you bought: prices " + signedMoney(r.pl) + (own ? ""
+      : isFin(r.fxSince) ? " · currency move " + signedMoney(r.fxSince) +
+        (isFin(r.rateBuy) ? " (you bought at about " + num(r.rateBuy, 4) + " " + cx.display + " per " + r.iso + " on average)" : "")
+      : " · currency move: " + (WHY_TXT[r.why] || "not known yet")),
+  ].join("\n");
+};
+const CurrenciesPanel = ({ d, w, first, pw }) => {
+  const cx = d.currencies;
+  if (!cx || typeof cx !== "object" || Array.isArray(cx) || !Array.isArray(cx.rows)) return null;
+  const rows = cx.rows.filter((r) => r && typeof r.iso === "string");
+  return (
+    <div className={first ? "" : sectionGap} {...(pw || {})}>
+      <div className={rowFlex}>
+        <span className={eyebrow} title="how much of the portfolio sits in each currency (cash included), and how currency moves changed its value">
+          currencies
+        </span>
+        <span className={mono} data-pw-cur-total="1" style={{ fontSize: 9.5, color: upDown(cx.dayFx || 0) }}
+          title="today's change from currency moves (cash not counted, as in the header)">
+          {"currency move today " + signedMoney(cx.dayFx)}
+        </span>
+      </div>
+      {rows.slice(0, CUR_ROWS).map((r) => {
+        const own = r.iso === cx.display;
+        return (
+          <div key={r.iso} className={rowFlex} style={{ marginTop: 3 }} data-pw-cur={r.iso} title={curTipOf(r, cx)}>
+            <span style={{ fontSize: 10, width: 34, whiteSpace: "nowrap" }}>{r.iso}</span>
+            <div className={css`flex:1; min-width:14px; height:4px; background:rgba(var(--pw-fg), 0.12); border-radius:2px; margin:0 6px;`}>
+              <div style={{ width: Math.max(0, Math.min(100, isFin(r.pct) ? r.pct : 0)) + "%", height: "100%",
+                background: C.line, borderRadius: 2, opacity: own ? 0.5 : 1 }} />
+            </div>
+            <span className={mono} style={{ fontSize: 9, width: 44, textAlign: "right" }}>{num(r.pct, 1) + "%"}</span>
+            {w && w < 260 ? null : (
+              <span className={mono} style={{ fontSize: 9, color: C.dim, width: 62, textAlign: "right" }}>{money(r.value)}</span>
+            )}
+            <span className={mono} style={{ fontSize: 9, width: 56, textAlign: "right", color: own ? C.dim : upDown(r.dayFx || 0) }}>
+              {own ? "·" : signedMoney(r.dayFx)}
+            </span>
+          </div>
+        );
+      })}
+      {rows.length > CUR_ROWS ? (
+        <div className={css`${mono} font-size: 8px; color: ${C.dim};`} style={{ marginTop: 2 }} data-pw-cur-more="1"
+          title={rows.slice(CUR_ROWS).map((r) => r.iso + " " + num(r.pct, 1) + "%").join(" · ")}>
+          {"+" + (rows.length - CUR_ROWS) + " more"}
+        </div>
+      ) : null}
+      <div className={css`${mono} font-size: 8.5px; color: ${C.dim};`} style={{ marginTop: 4 }} data-pw-cur-day="1"
+        title={"what today's change is made of: the share prices moving, and the currencies moving against " + cx.display}>
+        {"today: prices " + signedMoney(cx.dayPrice) + " · currency moves " + signedMoney(cx.dayFx)}
+      </div>
+      <div className={css`${mono} font-size: 8.5px; color: ${C.dim};`} style={{ marginTop: 2 }} data-pw-cur-since="1"
+        title={"the gain on what you hold now, in two parts: what the share prices did (counted at today's exchange rates, as in the P&L in the header)" +
+          " and what currency moves since each purchase added or took away" +
+          (isFin(cx.plFx) ? "\ntogether: " + signedMoney(cx.plFx) : "\ncurrency moves: " + (WHY_TXT[cx.why] || "not known yet"))}>
+        {"since you bought: prices " + signedMoney(cx.pl) + " · currency moves " + (isFin(cx.fxSince) ? signedMoney(cx.fxSince) : "—")}
+      </div>
     </div>
   );
 };
@@ -4065,7 +4650,8 @@ const RebalancePanel = ({ d, state, dispatch, first, pw }) => {
   return (
     <div className={first ? "" : sectionGap} {...(pw || {})}>
       <div className={rowFlex}>
-        <span className={eyebrow} title={"_settings.targets in positions.json: the fewest dollars of trades that bring every holding, sector and cash within ±" +
+        <span className={eyebrow} style={{ cursor: "pointer" }} data-pw-rebal-edit="1" onClick={() => dispatch({ type: "OPEN_EDITOR", group: "portfolio" })}
+          title={"your target mix (⚙ → Portfolio → target mix): the fewest dollars of trades that bring every holding, sector and cash within ±" +
           band + " percentage point of its target"}>{"rebalance · ±" + band + " pt"}</span>
         {on ? (
           <span>
@@ -4392,6 +4978,15 @@ const Bell = ({ rules }) => (!rules || !rules.length ? null : (
   <span title={"price alerts:\n" + rules.map(ruleLine).join("\n")}
     style={{ color: rules.some((r) => r.status === "fired") ? C.amber : C.dim, fontSize: 8, marginLeft: 2 }}>⍾</span>
 ));
+// 13.6: ✎ after the bell when a stock has a note or a price target (amber once reached)
+const NoteMark = ({ e, p }) => {
+  if (!e) return null;
+  const g = targetGap(e, p);
+  return (
+    <span data-pw-note-mark="1" title={noteTip(e, p)}
+      style={{ color: g && g.reached ? C.amber : C.dim, fontSize: 8, marginLeft: 2 }}>{"\u270E"}</span>
+  );
+};
 // a ticker cell with a bell / news dot: the markers keep their room and a
 // long ticker gives way (ends in …); without them the cell is as in 12.8
 // (whether a row has them: marksOf in renderWin, as row.bell / row.news allow)
@@ -4424,6 +5019,85 @@ const RuleRow = ({ r, dispatch, busy, long }) => (
 
 // detail view: the "alert at…" box, this stock's rules, and (opt-in) headlines
 // (alerts / news false: that part is switched off in this window, 12.12)
+// 13.6: the note / price target rows of a detail view (only with data.json
+// "notes"). One "note" row offers both until a stock has either; then a
+// "price target" row and a "note" row. The box saves on Return / save only.
+const NOTE_TIP = "a line for yourself — why you bought it, what to watch";
+const targetTipOf = (p) => "a price you are waiting for, in " + (p.currency || "its currency") +
+  " — the widget shows how far away it is";
+// the open box: Return or "save" saves, Esc or "cancel" closes, leaving it does nothing
+const NoteBox = ({ p, e, state, dispatch }) => {
+  const field = state.noteEdit === "target" ? "target" : "note", tk = p.ticker, busy = !!state.noteBusy;
+  const stored = !!(e && (field === "note" ? e.note !== null : e.target !== null));
+  return (
+    <div className={rowFlex} style={{ marginTop: 4 }}>
+      <input className={inputCss} style={{ flex: 1, minWidth: 0 }} data-pw-note-input={field} autoFocus
+        value={state.noteInput || ""} maxLength={field === "note" ? 200 : 40}
+        placeholder={field === "note" ? "a line for yourself (up to 200 characters)"
+          : "a price you are waiting for, like 72 (" + (p.currency || "its currency") + ")"}
+        onChange={(ev) => dispatch({ type: "NOTE_INPUT", value: ev.target.value })}
+        onKeyDown={(ev) => { if (isEnter(ev)) submitNote(state, p, dispatch); else if (isEscape(ev)) dispatch({ type: "NOTE_CANCEL" }); }} />
+      <span className={tabBtn} style={{ opacity: busy ? 0.5 : 1 }} data-pw-note-save="1"
+        onClick={() => submitNote(state, p, dispatch)}>save</span>
+      {stored ? (
+        <span className={tabBtn} style={{ opacity: busy ? 0.5 : 1 }} data-pw-note-clear="1"
+          title={field === "note" ? "remove the note" : "remove the price target"}
+          onClick={() => { if (!busy) metaCall(field === "note" ? ["note", tk, ""] : ["target", tk, "clear"], tk, dispatch); }}>clear</span>
+      ) : null}
+      <span className={tabBtn} data-pw-note-cancel="1" onClick={() => dispatch({ type: "NOTE_CANCEL" })}>cancel</span>
+    </div>
+  );
+};
+const NoteRows = ({ p, d, state, dispatch, alertsOn, narrow }) => {
+  const tk = p.ticker;
+  const e = noteOf(state, d, tk);
+  const edit = state.noteEdit || null;
+  const open = (field, value) => dispatch({ type: "NOTE_EDIT", field: field, value: value });
+  const tTip = targetTipOf(p);
+  const g = e ? targetGap(e, p) : null;
+  const tFull = e && e.target !== null ? num(e.target, 2) + " " + (p.currency || "") + (g ? " · " + gapText(g) : "") : "";
+  const showAlert = !!(e && e.target !== null && alertsOn && !narrow && isFin(p.price) && !(g && g.reached) &&
+    !rulesFor(d, tk).some((r) => (r.kind === "above" || r.kind === "below") && r.level === e.target));
+  const row = (key, label, right) => (
+    <div key={key} className={css`${statRow} ${mono}`} data-pw-note-row={key}>
+      <span style={{ color: C.dim, whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ display: "flex", alignItems: "baseline", minWidth: 0, marginLeft: 8, whiteSpace: "nowrap" }}>{right}</span>
+    </div>
+  );
+  const btn = (field, text, value, ml) => (
+    <span key={"b" + field + text} className={linkBtn} style={ml ? { marginLeft: 8 } : null} data-pw-note-edit={field}
+      title={field === "note" ? NOTE_TIP : tFull ? tFull + "\nclick to change" : tTip}
+      onClick={() => open(field, value)}>{text}</span>
+  );
+  const tRight = !e || e.target === null ? [btn("target", "set one", "", false)] : [
+    <span key="gap" title={tFull} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+      {narrow && g ? null : num(e.target, 2) + " " + (p.currency || "") + (g ? " · " : "")}
+      {g ? <span style={{ color: g.reached ? C.amber : C.dim }}>{gapText(g)}</span> : null}
+    </span>,
+    btn("target", "change", String(e.target), true),
+    showAlert ? (
+      <span key="alert" className={linkBtn} style={{ marginLeft: 8 }} data-pw-note-alert="1"
+        title="a Mac notification once the price gets there"
+        onClick={() => alertCall(["add", tk, e.side || (e.target > p.price ? "above" : "below"), String(e.target)], dispatch, false)}>
+        alert me</span>
+    ) : null,
+  ];
+  const nRight = !e || e.note === null ? [btn("note", "add one", "", false)] : [
+    <span key="text" data-pw-note-edit="note" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
+      whiteSpace: "nowrap", cursor: "pointer" }}
+      title={e.note + (e.at ? "\nwritten " + fmtIsoY(e.at) : "") + "\nclick to change"}
+      onClick={() => open("note", e.note)}>{e.note}</span>,
+  ];
+  const box = edit ? <NoteBox key="box" p={p} e={e} state={state} dispatch={dispatch} /> : null;
+  const msg = state.noteMsg ? (
+    <div key="msg" data-pw-note-msg="1"
+      className={css`${mono} font-size:8.5px; color:${/^error/.test(state.noteMsg) ? C.down : C.amber}; margin-top:3px;`}>
+      {state.noteMsg}</div>
+  ) : null;
+  const rows = !e ? [row("empty", "note", [btn("note", "add a note", "", false), btn("target", "set a price target", "", true)]), box]
+    : [row("target", "price target", tRight), edit === "target" ? box : null, row("note", "note", nRight), edit === "target" ? null : box];
+  return <div>{rows}{msg}</div>;
+};
 const DetailExtras = ({ p, d, state, dispatch, alerts, news }) => {
   const held = p.shares !== undefined && p.shares !== null;
   // no purchase price or date: the cost is today's price, a % from it stays 0
@@ -4813,7 +5487,7 @@ const sortRows = (rows, sort) => {
 // body fits, shrinking the graph, then rows in the tallest column; then grow
 // rows and the graph into what is left. Same inputs, same layout.
 const PRIO_RANK = { room: 0, normal: 1, always: 2 };
-const HEAD_IDS = ["header.value", "header.day", "header.fx", "header.pl", "header.div", "header.realized", "header.totalReturn", "header.annual"];
+const HEAD_IDS = ["header.value", "header.day", "header.fx", "header.pl", "header.div", "header.realized", "header.totalReturn", "header.annual", "header.goal"];
 const GRAPH_PARTS = [["graph.tabs", 11], ["graph.bench", 12], ["graph.backtest", 13], ["graph.late", 14], ["graph.notes", 15]];
 const LIST_ORDER = [["holdings", "panel.holdings"], ["earnings", "panel.earnings"], ["days", "panel.days"], ["news", "panel.news"], ["map", "panel.holdings"]];
 const monoW = (chars, px, K) => chars * (K || LAYOUT_K).MONO * px;
@@ -4899,8 +5573,10 @@ const layoutFor = (win, ctx, K0) => {
   L.captionW = graphW - K.CAPTION_OFF;
   L.mapBigW = CW + 2;
   const tabsW = (ctx.tabs || []).reduce((a, b) => a + b, 0);
-  L.tabWrap = tabsW + K.TAB_BIG > CW;
-  L.tabLines = !tabsW ? 1 : L.tabWrap ? packLines(ctx.tabs, CW - K.TAB_RESERVE) : 1;
+  L.tabWrap = tabsW + Math.max(K.TAB_BIG, ctx.tabsReadout || 0) > CW;
+  // (13.6: ctx.tabsReadout — a narrow window's change figure rides on the tabs line)
+  L.tabLines = !tabsW ? 1 : !L.tabWrap ? 1
+    : ctx.tabsReadout ? packLines(ctx.tabs.concat([ctx.tabsReadout]), CW) : packLines(ctx.tabs, CW - K.TAB_RESERVE);
   if (ctx.compact) {
     // the one-line row: the sparkline gives way first, then the money figure
     const cw = ctx.compactW || 0;
@@ -5391,6 +6067,8 @@ const SIZE_PRESETS = [["narrow", 360], ["normal", WIDGET_W], ["wide", 992]];
 const HISTORY_ORDER = ["3", "5", "10", "max"];
 const HISTORY_LABELS = { "3": "3 years", "5": "5 years", "10": "10 years", max: "everything" };
 const PENDING_NOTE = "takes effect on the next update (about a minute)";
+const TGT_HINT = "The mix you are aiming for, in % of everything (holdings and cash). Give each sector one %, or split it by holding. "
+  + "An empty row counts as 0 %. After saving, the rebalancing panel and the off-target badges use it from the next update (about a minute).";
 const PENDING_LONGER = "loading more history — the graph fills in over the next few minutes";
 const ALERTS_NOTE = "No notification? Allow Script Editor in System Settings → Notifications.";
 const CURRENCY_CHIPS = ["USD", "EUR", "GBP", "CAD"];
@@ -5399,6 +6077,8 @@ BENCH_GROUPS.forEach((g) => g.items.forEach((it) => { BENCH_NAME[it[0]] = it[1];
 // a field commits on Enter and again when it loses focus: the same value is
 // sent once, until the reply is back (then a retry after an error works)
 const edSent = {};
+// the target mix last saved {obj, epoch}: the editor shows it until data.json (a newer epoch) carries it (13.6)
+const tgtSent = { obj: null, epoch: null };
 
 // 13.4: the ⚙ editor's "updates" row — what the last check found
 // quick picks beside the slider (its ends already say glass and solid)
@@ -5440,6 +6120,7 @@ const resetPortfolioSettings = (dispatch) => runQueued(["setting", "portfolio", 
   dispatch({ type: "PF_RESET_LOCAL" });
   Object.keys(r.ui || {}).forEach((k) => dispatch({ type: "UI_PATCH", key: k, value: r.ui[k] }));
   dispatch({ type: "EDIT_MSG", key: "portfolio", msg: null });
+  offerUndo(out, dispatch);
 }, () => dispatch({ type: "EDIT_MSG", key: "portfolio", msg: "could not reset" }));
 
 // state = the window's view, L = its layout (null in the one-line view),
@@ -5460,7 +6141,9 @@ const editorNode = (state, dispatch, d, L, has) => {
   // the search box (13.4): with a word typed, every group shows only the rows
   // whose label, hint or key carries it; a group with no such row goes
   const q = String(state.editQuery || "").trim().toLowerCase();
-  const matches = (...texts) => !q || texts.some((t) => String(t || "").toLowerCase().indexOf(q) >= 0);
+  // (13.6: qRow is q, except "" while a group whose hint matched draws its body)
+  let qRow = q;
+  const matches = (...texts) => !qRow || texts.some((t) => String(t || "").toLowerCase().indexOf(qRow) >= 0);
   // a row with no setting key: found by its words or its hint; the hint shows under it
   const wrow = (words, node, hint) => (!matches(words, hint) ? null
     : hints && hint ? [node, <div key={node.key + ":hint"} className={edHint}>{hint}</div>] : node);
@@ -5480,7 +6163,13 @@ const editorNode = (state, dispatch, d, L, has) => {
   );
   const group = (key, label, body, tip) => {
     const isOpen = q ? true : open === key;
-    const node = isOpen ? body() : null;
+    // 13.6: a search word in the group's hint shows the whole group ("drag", "resize")
+    const hintHit = !!q && !!EDIT_HINTS[key] && EDIT_HINTS[key].toLowerCase().indexOf(q) >= 0;
+    let node = null;
+    if (isOpen) {
+      if (hintHit) qRow = "";
+      try { node = body(); } finally { qRow = q; }
+    }
     if (q && !hasKids(node)) return null;   // nothing in here matches
     return (
       <div key={key}>
@@ -5488,7 +6177,7 @@ const editorNode = (state, dispatch, d, L, has) => {
           onClick={() => { if (!q) dispatch({ type: "EDIT_GROUP", group: open === key ? "none" : key }); }}>
           {(isOpen ? "▾ " : "▸ ") + label}
         </div>
-        {isOpen && hints && !q && EDIT_HINTS[key] ? <div className={edHint}>{EDIT_HINTS[key]}</div> : null}
+        {isOpen && hints && (!q || hintHit) && EDIT_HINTS[key] ? <div className={edHint}>{EDIT_HINTS[key]}</div> : null}
         {node}
       </div>
     );
@@ -5509,9 +6198,13 @@ const editorNode = (state, dispatch, d, L, has) => {
         <span style={tone === "ok" ? edOk : tone === "warn" ? edMsg : edNote}>{m || n}</span></div>
     ) : null;
   };
+  // 13.6: in a narrow window a row of 4+ chips puts its label on a line of its own,
+  // so every chip line starts at the same place
+  const edNarrow = G.Wu < LAYOUT_K.NARROW;
   const srow = (key, label, body, hint, extraMsg) => !matches(key, label, hint) ? null : (
     <div key={"s:" + key} data-pw-edsetting={key}>
-      <div className={edLine}><span style={edDim}>{label}</span>{body}</div>
+      <div className={edLine}><span style={edNarrow && Array.isArray(body) && body.length >= 4
+        ? Object.assign({}, edDim, { flex: "0 0 100%" }) : edDim}>{label}</span>{body}</div>
       {hints && hint ? <div className={edHint}>{hint}</div> : null}
       {rowMsg(key, extraMsg)}
     </div>
@@ -5576,6 +6269,39 @@ const editorNode = (state, dispatch, d, L, has) => {
     if (Number(raw) === invNow) return;
     save("invested", raw, pending("invested", PENDING_NOTE));
   };
+  // 13.6: the goal (Enter in either field, or "save"; no blur commit, as with cash)
+  const gNow = goalOf(d);
+  const goalV = goalView(d);
+  const commitGoal = (ev) => {
+    const row = ev.currentTarget.closest("[data-pw-edsetting=goal]");
+    const amtEl = row && row.querySelector("[data-pw-edfield=goal]"), dateEl = row && row.querySelector("[data-pw-edfield=goalDate]");
+    if (!amtEl || !dateEl) return;
+    const amtText = String(amtEl.value).trim(), raw = String(dateEl.value).trim();
+    if (!amtText) return;
+    const dateText = /^\d{4}$/.test(raw) ? raw : parseDateLoose(raw);
+    if (!dateText) {
+      dispatch({ type: "EDIT_MSG", key: "goal", msg: "the date must be a year like 2035 or a date like 2035-06-30" });
+      return;
+    }
+    if (!gNow) {   // a first goal: customised windows get the goal line too (as its own undo record, saved first)
+      let disp = base, changed = false;
+      ((displayOf(state) || {}).windows || []).forEach((w) => {
+        if (!w || !Array.isArray(w.items) || w.items.indexOf("header.value") < 0 || w.items.indexOf("header.goal") >= 0) return;
+        const items = w.items.slice();
+        insertItem(items, "header.goal");
+        disp = patchWin(disp, w.id, { items: items });
+        changed = true;
+      });
+      if (changed) {
+        saveDisplay(disp, dispatch);
+        if (dispSave.timer) { clearTimeout(dispSave.timer); flushDisplay(); }   // now, so the goal is the newest undo record
+      }
+    }
+    // the currency the row shows: a goal set in another currency stays in it (re-saving it in
+    // the portfolio currency only when there is no exchange rate, as the warn line says)
+    const goalCur = gNow && gNow.cur && !(goalV && goalV.noRate) ? gNow.cur : (d.currency || "USD");
+    save("goal", goalCur + " " + amtText + " " + dateText);
+  };
   const btRaw = ui.backtestYears != null ? ui.backtestYears : d.backtestYears;
   const btNow = HISTORY_ORDER.indexOf(String(btRaw)) >= 0 ? String(btRaw) : "5";
   const saveBt = (v) => save("backtestYears", v,
@@ -5612,6 +6338,122 @@ const editorNode = (state, dispatch, d, L, has) => {
       title={lo + "–" + hi + " % (Enter)"} onKeyDown={(ev) => { if (isEnter(ev)) thrCommit(key, lo, hi, cur)(ev); }} onBlur={thrCommit(key, lo, hi, cur)} />
   );
   const rbNow = typeof state.rebalWhole === "boolean" ? state.rebalWhole : typeof ui.rebalanceWhole === "boolean" ? ui.rebalanceWhole : null;
+  // ---- the target mix (13.6): one % per sector (or per holding, "by holding") and cash, typed
+  // into a per-window draft; "save target mix" or Enter in a field writes _settings.targets
+  const tgtModelNow = () => tgtModel(d, tgtSent.obj && d.epoch != null && tgtSent.epoch === d.epoch ? tgtSent.obj : null);
+  const tgtR2 = (v) => String(Math.round(v * 100) / 100);
+  const tgtAfter = (obj) => () => {
+    tgtSent.obj = obj; tgtSent.epoch = d.epoch;
+    dispatch({ type: "TGT_RESET" });
+    pending("targets", PENDING_NOTE)();
+  };
+  const tgtSaveMix = (model, draft) => {
+    const c = tgtCollect(model, draft);
+    if (c.bad.length) return dispatch({ type: "EDIT_MSG", key: "targets", msg: c.bad[0] + ": a target is a number from 0 to 100" });
+    const empty = !Object.keys(c.obj).length;
+    save("targets", empty ? "default" : JSON.stringify(c.obj), tgtAfter(empty ? {} : c.obj));
+  };
+  // "now 21.8 %" (narrow window: "21.8 %", the rest in the title); one width, so the fields line up
+  const tgtNowCss = Object.assign({}, edDim, { minWidth: edNarrow ? 40 : 64, flex: "none" });
+  const tgtNow = (pct) => (edNarrow
+    ? <span key="now" style={tgtNowCss} title={"now " + num(pct, 1) + " % of everything"}>{num(pct, 1) + " %"}</span>
+    : <span key="now" style={tgtNowCss}>{"now " + num(pct, 1) + " %"}</span>);
+  const tgtField = (model, draft, key) => {
+    const text = tgtText(model, draft, key), bad = isNaN(tgtParse(text));
+    return [
+      <input key={"in:" + key} className={inputCss} value={text} inputMode="decimal" placeholder="0"
+        style={Object.assign({}, edNum, { width: 40 }, bad ? { color: C.down } : null)}
+        data-pw-edfield={"tgt:" + key} data-pw-bad={bad ? "1" : undefined} title="% of everything (Enter saves the mix)"
+        onChange={(ev) => dispatch({ type: "TGT_DRAFT", key: key, value: ev.target.value })}
+        onKeyDown={(ev) => { if (isEnter(ev)) tgtSaveMix(model, draft); }} />,
+      <span key={"pc:" + key} style={edDim}>%</span>,
+    ];
+  };
+  // "by holding" / "as one": a draft starts from the saved mix first
+  const tgtSplitTo = (model, draft, name, on) => {
+    if (!draft) {
+      const vals = {};
+      Object.keys(model.saved).forEach((k) => { vals[k] = String(model.saved[k]); });
+      dispatch({ type: "TGT_FILL", vals: vals, split: model.split0 });
+    }
+    dispatch({ type: "TGT_SPLIT", sector: name, on: on });
+  };
+  // one line per sector (its holdings under it when split), then cash
+  const tgtLines = (model, draft, c) => {
+    const nameCss = { color: C.dim, width: edNarrow ? 72 : 96, flex: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+    const rows = [];
+    model.sectors.forEach((s) => {
+      const sp = tgtSplitOf(model, draft, s.name);
+      rows.push(<div key={"tgt:s:" + s.name} className={edLine} data-pw-tgtrow={"s:" + s.name}>
+        <span style={nameCss} title={s.name + ": " + s.tickers.map((t) => t.ticker).join(", ")}>{s.name}</span>
+        {tgtNow(s.nowPct)}
+        {sp ? <span style={edDim} data-pw-tgtsum="1" title="its holdings' % added up">{"= " + tgtR2(c.sums[s.name] || 0) + " %"}</span>
+          : tgtField(model, draft, "s:" + s.name)}
+        {s.tickers.length >= 2 || sp ? chip(sp ? "as one" : "by holding", false, () => tgtSplitTo(model, draft, s.name, !sp),
+          sp ? "one % for the whole sector" : "a % for each holding in it", "tgt:split:" + s.name, { chip: "split:" + s.name }) : null}
+      </div>);
+      if (sp) s.tickers.forEach((t) => rows.push(
+        <div key={"tgt:t:" + t.ticker} className={edLine} data-pw-tgtrow={"t:" + t.ticker} style={{ paddingLeft: 14 }}>
+          <span className={mono} style={{ width: edNarrow ? 58 : 82, flex: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.ticker}</span>
+          {tgtNow(t.nowPct)}
+          {tgtField(model, draft, "t:" + t.ticker)}
+        </div>));
+    });
+    rows.push(<div key="tgt:cash" className={edLine} data-pw-tgtrow="cash">
+      <span style={nameCss}>cash</span>{tgtNow(model.cashNow)}{tgtField(model, draft, "cash")}</div>);
+    return rows;
+  };
+  const tgtRow = () => {
+    if (!matches("targets target mix rebalancing sectors off-target drift", "target mix", TGT_HINT)) return null;   // ("drift": old wording)
+    const tail = [hints ? <div key="tgt:hint" className={edHint}>{TGT_HINT}</div> : null, rowMsg("targets")];
+    if (!Array.isArray(d.positions) || !d.positions.length) return (
+      <div key="s:targets" data-pw-edsetting="targets">
+        <div className={edHint} data-pw-ednote="targets">add a holding first — then set the mix here</div></div>);
+    const model = tgtModelNow(), draft = state.tgtDraft || null;
+    if (!draft && !model.any) return (   // collapsed: nothing saved, nothing typed
+      <div key="s:targets" data-pw-edsetting="targets">
+        <div className={edLine} data-pw-ednote="targets">
+          <span style={edDim}>target mix</span><span style={edOk}>not set — the rebalancing panel needs one</span>
+          {chip("set one", false, () => dispatch({ type: "TGT_FILL", vals: {}, split: {} }), "type a % for each sector", "tgt:open", { chip: "tgt:open" })}
+          {chip("start from today's mix", false, () => dispatch(Object.assign({ type: "TGT_FILL" }, todaysMix(model))),
+            "fill in each sector's share today — then change what you like", "tgt:today", { chip: "tgt:today" })}
+        </div>
+        {tail}
+      </div>);
+    const c = tgtCollect(model, draft), dirty = tgtDirty(model, draft);
+    const tone = c.bad.length ? "bad" : !Object.keys(c.obj).length ? "empty" : Math.abs(c.sum - 100) <= 0.01 ? "ok" : c.sum < 100 ? "left" : "over";
+    const total = { ok: "adds up to 100 % ✓", left: tgtR2(100 - c.sum) + " % left to place", over: tgtR2(c.sum - 100) + " % too much — lower a row",
+      bad: "fix the red field", empty: "" }[tone];
+    const nested = model.nested.filter((n) => !tgtSplitOf(model, draft, n.sector));
+    return (
+      <div key="s:targets" data-pw-edsetting="targets">
+        <div className={edLine}><span style={edDim}>target mix</span>
+          <span style={tone === "ok" ? edOk : edMsg} data-pw-tgttotal={tone}>{total}</span>
+          {dirty ? <span style={edMsg} data-pw-tgtdirty="1">{(total ? "· " : "") + "not saved yet"}</span> : null}</div>
+        {tgtLines(model, draft, c)}
+        {model.stale.length ? <div className={edLine} data-pw-tgtstale="1"><span style={edNote}>{"not held any more: "
+          + model.stale.map((x) => x[0] + " " + tgtR2(x[1]) + " %").join(", ") + " — left out when you save"}</span></div> : null}
+        {nested.length ? <div className={edLine} data-pw-tgtnested="1"><span style={edNote}>{nested.map((n) => n.ticker + "'s own % is not used — its sector "
+          + n.sector + " has one.").join(" ") + ' Use "by holding" to set each holding instead.'}</span></div> : null}
+        <div className={edLine}>
+          <span key="tgt:save" className={dirty ? css`${edChip} ${edChipOn}` : edChip} style={dirty ? undefined : { opacity: 0.5, cursor: "default" }}
+            data-pw-edchip="tgt:save" data-pw-off={dirty ? undefined : "1"} onClick={dirty ? () => tgtSaveMix(model, draft) : undefined}
+            title={dirty ? "save the mix (Enter in any field does the same)" : "nothing changed"}>save target mix</span>
+          {draft ? chip("undo changes", false, () => dispatch({ type: "TGT_RESET" }), "back to the saved mix", "tgt:undo", { chip: "tgt:undo" }) : null}
+          {chip("use today's mix", false, () => dispatch(Object.assign({ type: "TGT_FILL" }, todaysMix(model))),
+            "each sector's share today, in whole %", "tgt:today", { chip: "tgt:today" })}
+          {model.any ? chip("remove target mix", confirm === "tgt:clear", () => dispatch({ type: "EDIT_CONFIRM", what: confirm === "tgt:clear" ? null : "tgt:clear" }),
+            undefined, "tgt:clear", { chip: "tgt:clear" }) : null}
+        </div>
+        {confirm === "tgt:clear" ? <div className={edLine} data-pw-edconfirm="tgt:clear">
+          <span style={edMsg}>remove the target mix? the rebalancing panel and the off-target badges go away</span>
+          {chip("yes, remove", false, () => { dispatch({ type: "EDIT_CONFIRM", what: null }); save("targets", "default", tgtAfter({})); },
+            undefined, "tgt:clear:yes", { chip: "tgt:clear:yes" })}
+          {chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "tgt:clear:no", { chip: "tgt:clear:no" })}
+        </div> : null}
+        {tail}
+      </div>);
+  };
   // appearance and the update check (13.4)
   const themeSaved = typeof ui.theme === "string" && THEMES.indexOf(ui.theme) >= 0 ? ui.theme : "dark";
   const opSaved = opacitySaved(state), opNow = opacityOf(state);
@@ -5640,12 +6482,18 @@ const editorNode = (state, dispatch, d, L, has) => {
             data-pw-edfield="currency" title="a 3-letter code (Enter)" onKeyDown={(ev) => { if (isEnter(ev)) commitCur(ev); }} onBlur={commitCur} />,
         ] : []),
       "The money everything is shown in. auto = your Mac's region.")}
-      {srow("cash", "cash on hand", cashIsos.map((c) => {
-        const v = cashNow[c];
-        return chip(c + " " + num(v, v % 1 ? 2 : 0) + " ×", false, () => save("cash", c + " default", pending("cash", PENDING_NOTE)),
-          "remove this cash", "cash:" + c, { chip: "cash:" + c });
-      }).concat([
-        <input key="cash:amt" className={inputCss} style={edNum} placeholder="1200" inputMode="decimal" data-pw-edfield="cash"
+      {srow("cash", "cash on hand", [].concat.apply([], cashIsos.map((c) => {
+        // 13.6: × asks first (yes / no); clicking the question again keeps the cash
+        const v = cashNow[c], amt = num(v, v % 1 ? 2 : 0), asking = confirm === "cash:" + c;
+        const ask = () => dispatch({ type: "EDIT_CONFIRM", what: asking ? null : "cash:" + c });
+        return !asking ? [chip(c + " " + amt + " ×", false, ask, "remove this cash (asks first)", "cash:" + c, { chip: "cash:" + c })] : [
+          chip("remove " + c + " " + amt + "?", true, ask, "click to keep it", "cash:" + c, { chip: "cash:" + c }),
+          chip("yes, remove", false, () => { dispatch({ type: "EDIT_CONFIRM", what: null }); save("cash", c + " default", pending("cash", PENDING_NOTE)); },
+            undefined, "cash:yes", { chip: "cash:yes" }),
+          chip("no", false, () => dispatch({ type: "EDIT_CONFIRM", what: null }), undefined, "cash:no", { chip: "cash:no" }),
+        ];
+      })).concat([
+        <input key="cash:amt" className={inputCss} style={edNum} placeholder="amount" inputMode="decimal" data-pw-edfield="cash"
           title="an amount, then Enter" onKeyDown={(ev) => { if (isEnter(ev)) commitCash(ev); }} />,
         <input key={"cash:cur:" + (d.currency || "USD")} className={inputCss} style={edNum} defaultValue={d.currency || "USD"} maxLength={3}
           data-pw-edfield="cashCur" title="the currency of this cash, like CAD or EUR" onKeyDown={(ev) => { if (isEnter(ev)) commitCash(ev); }} />,
@@ -5653,11 +6501,24 @@ const editorNode = (state, dispatch, d, L, has) => {
       ]),
       "money not invested — counted in the total and used by the rebalance panel. Typing a currency again replaces its amount; × removes it.")}
       {srow("invested", "money put in so far", [
-        <input key={"inv:" + invNow} className={inputCss} style={edNum} defaultValue={invNow ? String(invNow) : ""} placeholder="25000"
+        <input key={"inv:" + invNow} className={inputCss} style={edNum} defaultValue={invNow ? String(invNow) : ""} placeholder="amount"
           inputMode="decimal" data-pw-edfield="invested" title="everything you have paid in (Enter)"
           onKeyDown={(ev) => { if (isEnter(ev)) invCommit(ev); }} onBlur={invCommit} />,
         <span key="inv:cur" style={edDim}>{d.currency || "USD"}</span>,
       ], "everything you have paid in so far, in the portfolio currency — the profit line in the header can then be shown against it (click it); buys and sells keep it up to date")}
+      {srow("goal", "a goal to reach", [
+        <input key={"goal:" + (gNow ? gNow.value : "")} className={inputCss} style={edNum} data-pw-edfield="goal" placeholder="250000"
+          inputMode="decimal" defaultValue={gNow ? String(gNow.value) : ""} title="the amount (Enter)"
+          onKeyDown={(ev) => { if (isEnter(ev)) commitGoal(ev); }} />,
+        <span key="goal:cur" style={edDim}>{gNow && gNow.cur ? gNow.cur : d.currency || "USD"}</span>,
+        <span key="goal:by" style={edDim}>by</span>,
+        <input key={"goalD:" + (gNow ? gNow.date : "")} className={inputCss} style={edNum} data-pw-edfield="goalDate" placeholder="2035" maxLength={10}
+          defaultValue={gNow ? (/-12-31$/.test(gNow.date) ? gNow.date.slice(0, 4) : gNow.date) : ""}
+          title="a year like 2035 or a date like 2035-06-30 (Enter)" onKeyDown={(ev) => { if (isEnter(ev)) commitGoal(ev); }} />,
+        chip("save", false, commitGoal, "save the goal", "goal:save", { chip: "goal:save" }),
+      ].concat(gNow ? [chip("remove", false, () => save("goal", "default"), "no goal", "goal:off", { chip: "goal:off" })] : []),
+      "An amount you want the portfolio to reach and when — the header shows how far along you are, and (after a year of history) whether your annual return so far gets you there. Not a forecast.",
+      goalV && goalV.noRate ? { tone: "warn", text: "your goal is in " + gNow.cur + " — save it again to set it in " + d.currency } : null)}
       {srow("backtestYears", "history", HISTORY_ORDER.map((v) => chip(HISTORY_LABELS[v], btNow === v, () => saveBt(v), undefined, "bt:" + v, { chip: v })),
         "How far back the graph and 'what if you had bought earlier' go. everything = all the prices Yahoo has. A longer history loads once and takes a few minutes.")}
       {srow("benchmark", "compare with an index", [
@@ -5689,14 +6550,12 @@ const editorNode = (state, dispatch, d, L, has) => {
         <span key="pc" style={edDim}>%</span>]) : null}
       {alertsNow ? srow("portfolioAlertThreshold", "the portfolio moves more than", [thrField("portfolioAlertThreshold", 0.1, 50, thrNow("portfolioAlertThreshold", 2.5)),
         <span key="pc" style={edDim}>%</span>]) : null}
+      {tgtRow()}
       {targetsOn(d) ? srow("rebalanceWhole", "rebalancing suggests", [
         chip("whole shares only", rbNow === true, () => saveRebalWhole(true, dispatch), undefined, "rb:true", { chip: "true" }),
         chip("fractions of a share", rbNow === false, () => saveRebalWhole(false, dispatch), undefined, "rb:false", { chip: "false" }),
         chip("let the widget choose", rbNow === null, () => saveRebalWhole(null, dispatch), "whole shares when every holding is a whole number of shares", "rb:default", { chip: "default" }),
       ], "how the rebalance panel rounds its buy / sell amounts") : null}
-      {targetsOn(d) ? wrow("targets rebalancing target share", <div key="tgt" className={edHint} style={{ marginTop: 4 }}>Target share of each holding (for rebalancing): still edited in the positions file — see README.</div>)
-        : wrow("rebalancing suggests whole shares fractions targets target mix", <div key="tgt" className={edHint} data-pw-ednote="targets">
-          rebalancing: needs a target mix first — set in the positions file, see README → Targets and rebalancing</div>)}
       {srow("theme", "look", [
         chip("dark", themeSaved === "dark", () => save("theme", "dark"), "light text on a dark card", "th:dark", { chip: "dark" }),
         chip("light", themeSaved === "light", () => save("theme", "light"), "dark text on a light card", "th:light", { chip: "light" }),
@@ -5705,7 +6564,7 @@ const editorNode = (state, dispatch, d, L, has) => {
       ], "Dark, light, or whatever the Mac is set to.")}
       {srow("opacity", "background", [
         <span key="op:lo" style={edDim}>glass</span>,
-        <input key={"op:" + opSaved} type="range" min="30" max="100" step="1" defaultValue={String(Math.round(opSaved * 100))}
+        <input key={"op:" + opSaved + ":" + (msgOf("opacity") || "")} type="range" min="30" max="100" step="1" defaultValue={String(Math.round(opSaved * 100))}
           style={{ flex: "1 1 60px", minWidth: 50, maxWidth: 180, margin: 0 }} data-pw-edfield="opacity"
           title="drag: how solid the window's background is"
           onChange={(ev) => dispatch({ type: "OPACITY_DRAFT", value: Number(ev.target.value) / 100 })}
@@ -5904,6 +6763,8 @@ const editorNode = (state, dispatch, d, L, has) => {
     const fid = f.id, inIt = set[fid] === true, live = enabled(dw, fid);
     const parentOn = !f.parent || enabled(dw, f.parent);
     const note = !live ? "" : L && L.folded.indexOf(fid) >= 0 ? "(hidden — window too short)"
+      : has && has[fid] === false && fid === "panel.currencies" ? "(everything is in one currency)"
+      : has && has[fid] === false && fid === "header.goal" ? "(set one under Portfolio → a goal to reach)"
       : has && has[fid] === false && fid !== "panel.news" ? "(no data yet)" : "";
     const prio = adv && live && f.p ? (dw.prio && dw.prio[fid]) || f.p : null;
     const panelCtl = adv && live && f.kind === "panel";
@@ -5943,8 +6804,9 @@ const editorNode = (state, dispatch, d, L, has) => {
     const cfg = Object.assign({}, NEWS_DEF, raw);
     const setNews = (patch) => setWin({ news: normNews(Object.assign({}, cfg, patch)) || {} });
     const pad = (depthOf("panel.news") + 1) * 10;
-    const row = (label, body, key) => (
-      <div key={"news:" + key} className={edLine} style={{ width: "100%", boxSizing: "border-box", paddingLeft: pad }}>
+    // (13.6: the ⚙ search finds a row by its label or NEWS_OPT_WORDS)
+    const row = (label, body, key) => (!matches(label, NEWS_OPT_WORDS[key]) ? null :
+      <div key={"news:" + key} className={edLine} style={{ width: "100%", boxSizing: "border-box", paddingLeft: pad }} data-pw-ednews={key}>
         <span style={edDim}>{label}</span>{body}
       </div>
     );
@@ -5962,16 +6824,15 @@ const editorNode = (state, dispatch, d, L, has) => {
       }
     };
     const full = cfg.tickers.length >= NEWS_LIST_MAX;
-    return (
-      <div key="news:opts" data-pw-feature="panel.news" style={{ width: "100%", boxSizing: "border-box" }}>
-        {row("whose", [
+    const kids = [
+        row("whose", [
           pick("movers", "scope", "movers", "holdings moving > 3 % today (as before 13.1)"),
           pick("holdings", "scope", "holdings", "every held stock"),
           pick("watchlist", "scope", "watch", "the watchlist"),
           pick("both", "scope", "all", "holdings and the watchlist"),
           pick("pick…", "scope", "pick", "tickers you type (held or not)"),
-        ], "scope")}
-        {cfg.scope === "pick" ? row("tickers", [
+        ], "scope"),
+        cfg.scope === "pick" ? row("tickers", [
           <input key={"pick:" + cfg.tickers.join(" ")} className={inputCss} disabled={full}
             style={{ flex: "1 1 120px", minWidth: 0, fontSize: 9, padding: "1px 4px", opacity: full ? 0.6 : 1 }}
             defaultValue={full ? "" : cfg.tickers.join(" ")} placeholder={full ? NEWS_LIST_MAX + " picked (the most)" : "KO MSFT SHOP.TO"}
@@ -5981,26 +6842,34 @@ const editorNode = (state, dispatch, d, L, has) => {
               else if (isEscape(ev)) { ev.stopPropagation(); ev.target.value = cfg.tickers.join(" "); ev.target.blur(); }
             }} onBlur={commitPick} />,
           state.newsPickMsg ? <span key="bad" style={{ color: C.amber, whiteSpace: "nowrap" }}>{state.newsPickMsg}</span> : null,
-        ], "pick") : null}
-        {cfg.scope === "pick" && cfg.tickers.length ? row("picked", cfg.tickers.map((t) => chip(t + (failed.indexOf(t) >= 0 ? " ?" : "") + " ×", false,
+        ], "pick") : null,
+        cfg.scope === "pick" && cfg.tickers.length ? row("picked", cfg.tickers.map((t) => chip(t + (failed.indexOf(t) >= 0 ? " ?" : "") + " ×", false,
           () => setNews({ tickers: cfg.tickers.filter((x) => x !== t) }),
-          failed.indexOf(t) >= 0 ? t + ": headlines unavailable (Yahoo) — click to remove" : "click to remove " + t, "pk:" + t)), "picked") : null}
-        {row("per stock", [1, 3, 5, 10].map((n) => pick(String(n), "per", n, "headlines kept per ticker (Yahoo gives ~10)")), "per")}
-        {row("order", [pick("newest", "sort", "new", "newest first"), pick("movers", "sort", "move", "the biggest movers first (the stock open here first)"),
-          pick("A–Z", "sort", "ticker", "by ticker")], "sort")}
-        {row("since", [pick("today", "span", "day", "the last 24 hours"), pick("3 days", "span", "3d", "the last 3 days"),
-          pick("week", "span", "week", "the last 7 days"), pick("all", "span", "all", "any time")], "span")}
-        {row("layout", [flag("dense", "dense", "one line per story"), flag("group by ticker", "group", "a heading per ticker"),
-          flag("source", "sources", "show the source and the time")], "layout")}
-        {row("market news", NEWS_FEED_IDS.map((f) => chip(NEWS_FEEDS[f], cfg.market.indexOf(f) >= 0,
+          failed.indexOf(t) >= 0 ? t + ": headlines unavailable (Yahoo) — click to remove" : "click to remove " + t, "pk:" + t)), "picked") : null,
+        row("per stock", [1, 3, 5, 10].map((n) => pick(String(n), "per", n, "headlines kept per ticker (Yahoo gives ~10)")), "per"),
+        row("order", [pick("newest", "sort", "new", "newest first"), pick("movers", "sort", "move", "the biggest movers first (the stock open here first)"),
+          pick("A–Z", "sort", "ticker", "by ticker")], "sort"),
+        row("since", [pick("today", "span", "day", "the last 24 hours"), pick("3 days", "span", "3d", "the last 3 days"),
+          pick("week", "span", "week", "the last 7 days"), pick("all", "span", "all", "any time")], "span"),
+        row("layout", [flag("dense", "dense", "one line per story"), flag("group by ticker", "group", "a heading per ticker"),
+          flag("source", "sources", "show the source and the time")], "layout"),
+        row("market news", NEWS_FEED_IDS.map((f) => chip(NEWS_FEEDS[f], cfg.market.indexOf(f) >= 0,
           () => setNews({ market: cfg.market.indexOf(f) >= 0 ? cfg.market.filter((x) => x !== f) : cfg.market.concat([f]) }),
-          "the latest headlines from " + NEWS_FEEDS[f] + " (its public feed, fetched every 15 minutes) mixed into this page", "mk:" + f)), "market")}
-        {cfg.mute.length ? row("muted", cfg.mute.map((t) => chip(t + " ×", false, () => setNews({ mute: cfg.mute.filter((x) => x !== t) }), "show " + t + " again", "mu:" + t))
-          .concat([chip("unmute all", false, () => setNews({ mute: [] }), "show every ticker again", "mu:all")]), "mute") : null}
-        {cfg.q ? row("keyword", [chip("keyword: " + cfg.q + " ×", false, () => setNews({ q: "" }), "the saved filter (typed in the panel's filter box) — click to clear", "q")], "q") : null}
+          "the latest headlines from " + NEWS_FEEDS[f] + " (its public feed, fetched every 15 minutes) mixed into this page", "mk:" + f)), "market"),
+        cfg.mute.length ? row("muted", cfg.mute.map((t) => chip(t + " ×", false, () => setNews({ mute: cfg.mute.filter((x) => x !== t) }), "show " + t + " again", "mu:" + t))
+          .concat([chip("unmute all", false, () => setNews({ mute: [] }), "show every ticker again", "mu:all")]), "mute") : null,
+        cfg.q ? row("keyword", [chip("keyword: " + cfg.q + " ×", false, () => setNews({ q: "" }), "the saved filter (typed in the panel's filter box) — click to clear", "q")], "q") : null,
+    ];
+    // 13.6: while searching, only the matching option rows; none → no block at all
+    if (q && !kids.some((k) => k)) return null;
+    return (
+      <div key="news:opts" data-pw-feature="panel.news" style={{ width: "100%", boxSizing: "border-box" }}>
+        {kids}
       </div>
     );
   };
+  // does the search word name a news option (NEWS_OPT_WORDS)?
+  const newsOptHit = !!q && Object.keys(NEWS_OPT_WORDS).some((k) => NEWS_OPT_WORDS[k].indexOf(q) >= 0);
   const featureBody = (key) => () => {
     const out = [];
     FEATURES.forEach((f) => {
@@ -6008,9 +6877,14 @@ const editorNode = (state, dispatch, d, L, has) => {
       const ranges = f.id === "graph.tabs" ? FEATURES.filter((g) => g.parent === "graph.tabs" && /^graph\.range\./.test(g.id)).map((g) => g.id) : [];
       const modes = f.id === "graph.modes" ? ["graph.mode.value", "graph.mode.pl", "graph.mode.sectors"] : [];
       const sub = ranges.concat(modes).some((fid) => matches(FEATURE_BY[fid].label, FEATURE_BY[fid].tip, fid));
-      if (!matches(f.label, f.tip, f.id) && !sub) return;   // the search box (13.4)
+      // 13.6: the search also finds the news options (shown under a ticked news row;
+      // with news off, a one-line hint says to tick it first)
+      const newsOpts = f.id === "panel.news" && set["panel.news"] === true ? newsEditorNode() : null;
+      const newsHit = f.id === "panel.news" && set["panel.news"] !== true && newsOptHit;
+      if (!matches(f.label, f.tip, f.id) && !sub && !newsOpts && !newsHit) return;   // the search box (13.4)
       out.push(featureRow(f));
-      if (f.id === "panel.news" && set["panel.news"] === true && !q) out.push(newsEditorNode());
+      if (newsOpts) out.push(newsOpts);
+      else if (newsHit) out.push(<div key="news:off" className={edHint} data-pw-ednews="off">tick news to choose what it shows (whose news, how many per stock, since when, market news…)</div>);
       if (ranges.length && (sub || !q)) out.push(chipRow("ranges", ranges, 2));
       if (modes.length && (sub || !q)) out.push(chipRow("modes", modes, 3));
     });
@@ -6021,7 +6895,8 @@ const editorNode = (state, dispatch, d, L, has) => {
   const groupLabel = (g) => g[1] + (countOff(g[0]) ? " · " + countOff(g[0]) + " off" : "");
   const pfHead = "Portfolio · " + (d.currency || "auto") + " · " + HISTORY_LABELS[btNow];
   // while searching: does any feature row match (the "What it shows" caption), does anything at all
-  const anyFeature = !q || FEATURES.some((f) => matches(f.label, f.tip, f.id));
+  const newsAny = newsOptHit && (set["panel.news"] !== true || newsEditorNode() !== null);
+  const anyFeature = !q || newsAny || FEATURES.some((f) => matches(f.label, f.tip, f.id));
   const winHead = "This window" + (base.windows.length > 1 ? " · " + base.windows.length + " open" : "")
     + " · " + G.Wu + " × " + (isNumber(G.Hu) ? G.Hu : "fit");
   // the two settings groups, built once: while searching, group() runs every body and
@@ -6029,11 +6904,27 @@ const editorNode = (state, dispatch, d, L, has) => {
   const pfNode = group("portfolio", pfHead, portfolioBody, "the whole portfolio's settings — shared by every window");
   const winNode = group("window", winHead, winBody, "this window's name, place and size");
   const anyMatch = !q || anyFeature || pfNode !== null || winNode !== null;
+  // 13.6: the "undo" chip (3 min after a change) and the note after an undo (8 s);
+  // the editor re-renders every data tick, so both go on their own
+  const undoNow = Date.now();
+  const undoU = undoFresh(state.settingUndo || null, undoNow);
+  const undoWide = G.Wu - LAYOUT_K.PAD_X >= LAYOUT_K.UNDO_FULL_W;
+  const undoN = state.undoNote && typeof state.undoNote.at === "number" && undoNow - state.undoNote.at < UNDO_NOTE_MS ? state.undoNote : null;
+  // (in a narrow window the chip gets a line of its own under the header, so "⚙ Settings" keeps its room)
+  const undoChip = undoU ? <span key="undo" className={edChip} style={{ flex: "0 1 auto", minWidth: 0, maxWidth: LAYOUT_K.UNDO_CHIP, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+    data-pw-edundo={undoU.busy ? "busy" : "1"} data-pw-undo-key={undoU.key}
+    title={"put " + undoU.label + " back the way it was before your last change"}
+    onClick={() => undoSetting(state, dispatch)}>{undoU.busy ? "undoing…" : undoWide ? "undo: " + undoU.label : "undo"}</span> : null;
 
   return (
     <div className={edBox} data-pw-editor={id}>
       <div className={rowFlex} style={{ alignItems: "baseline", columnGap: 6 }}>
-        <span style={Object.assign({ flex: "1 1 auto", color: C.ink }, edLabel)} title="settings: the portfolio, this window and what it shows">{"⚙ Settings · " + nameOf(dw)}</span>
+        <span style={Object.assign({ flex: "1 1 auto", color: C.ink, display: "flex", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, edLabel)}
+          title={"settings: the portfolio, this window (" + nameOf(dw) + ") and what it shows"}>
+          <span style={{ flex: "none" }}>⚙ Settings</span>
+          {edNarrow ? null : <span data-pw-edtitle-name="1" style={{ whiteSpace: "pre", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{" · " + nameOf(dw)}</span>}
+        </span>
+        {undoU && !edNarrow ? undoChip : null}
         <input className={inputCss} style={{ width: 96, fontSize: 9, padding: "1px 5px", flex: "none" }} placeholder="find a setting…" value={state.editQuery || ""}
           data-pw-edfind="1" title="type a word — currency, zoom, news, dividends… — to see only the matching settings"
           onChange={(ev) => dispatch({ type: "EDIT_QUERY", value: ev.target.value })} />
@@ -6043,7 +6934,10 @@ const editorNode = (state, dispatch, d, L, has) => {
         <span className={edChip} style={{ fontSize: 10 }} title="close (Esc)" data-pw-edclose="1"
           onClick={() => dispatch({ type: "CLOSE_EDITOR" })}>×</span>
       </div>
-      {q && !anyMatch ? <div className={edHint} data-pw-edfind-none="1">{"nothing matches “" + q + "” — try currency, zoom, graph, news, alerts, dividends"}</div> : null}
+      {undoU && edNarrow ? <div className={edLine} data-pw-edundo-line="1">{undoChip}</div> : null}
+      {undoN ? <div className={edLine} data-pw-edundo-msg="1" data-pw-tone={undoN.err ? "warn" : "ok"}>
+        <span style={undoN.err ? edMsg : edOk}>{undoN.text}</span></div> : null}
+      {q && !anyMatch ? <div className={edHint} data-pw-edfind-none="1">{"nothing matches “" + q + "” — try currency, zoom, graph, news, since, muted, alerts, dividends"}</div> : null}
       {pfNode}
       {winNode}
       {!anyFeature ? null : <div className={edCaption}>
@@ -6388,7 +7282,7 @@ const renderWin = (state, dispatch) => {
             lead: (j0 > 0 ? "since " + fmtDayY(P[j0].t) + ": " : "") + "you " + f1(a) + " · " + sym + " " + f1(b) + " · ",
             // a narrow window with the "index: X ▾" picker on the same line:
             // the symbol is already there, so the lead leaves it out
-            leadShort: (j0 > 0 ? "since " + fmtDayY(P[j0].t) + ": " : "") + "you " + f1(a) + " · " + f1(b) + " · ",
+            leadShort: (j0 > 0 ? "since " + fmtDayY(P[j0].t) + ": " : "") + "you " + f1(a) + " · index " + f1(b) + " · ",
             verdict: diff > 0 ? "beat by " + diff.toFixed(1) + " pts" : diff < 0 ? "behind by " + Math.abs(diff).toFixed(1) + " pts" : "even with " + sym,
             // a narrow window (< 400 px): the symbol is in the lead or the picker, so just the gap
             short: diff === 0 ? "even" : (diff > 0 ? "+" : "−") + Math.abs(diff).toFixed(1) + " pts",
@@ -6468,7 +7362,8 @@ const renderWin = (state, dispatch) => {
   const mapRange = state.mapRange === "DRIFT" && !driftOn ? "1D" : state.mapRange;
   // a ticker's bell (price alerts) and news dot, as switched on (row.bell, row.news)
   const rulesOn = (tk) => (bellOn ? rulesFor(d, tk) : []);
-  const marksOf = (tk) => rulesOn(tk).length > 0 || (dotOn && markNewsOf(d, tk).length > 0);
+  const nOn = notesOn(d);   // 13.6: the ✎ mark of a note / price target
+  const marksOf = (tk) => rulesOn(tk).length > 0 || (dotOn && markNewsOf(d, tk).length > 0) || (nOn && !!noteOf(state, d, tk));
   const title = winTitle(state, d);
   const fxMain = d.fx && d.fx.length ? d.fx[0] : null;
 
@@ -6499,6 +7394,20 @@ const renderWin = (state, dispatch) => {
     (isFin(perfBlk.twrPct) ? "\ntime-weighted" + (typeof perfBlk.twrSince === "string" ? " since " + fmtIsoY(perfBlk.twrSince) : "") + ": " + pct1(perfBlk.twrPct) +
       (isFin(perfBlk.twrAnnualPct) ? " (" + pct1(perfBlk.twrAnnualPct) + "/yr)" : "") + ": the holdings' growth with new money taken out, cash left out" +
       (perfLeftOut.length ? "; without " + perfLeftOut.join(", ") + " (sold, no prices)" : "") : "");
+  // 13.6: the goal line's hover (always ends with "not a forecast")
+  const goalT = goalView(d);
+  const goalNotForecast = "This is simple arithmetic on your past return, not a forecast: markets go up and down, and past returns don't repeat.";
+  const goalTip = !goalT || goalT.noRate ? "" : [
+    "Your goal: " + money(goalT.goal) + " by " + fmtIsoLong(goalT.g.date) + ". You have " + money(goalT.now) + " now (" + goalT.pctNow + "%).",
+    goalT.reached ? "You have reached it." : goalT.passed ? "The goal date has passed."
+      : goalT.proj !== null ? "If it keeps growing at your annual return so far (" + pct1(goalT.xirr) + " a year, money-weighted since " +
+        fmtIsoY(goalT.since) + "), it would be about " + money(goalT.proj) + " by then — " +
+        (goalT.onTrack ? "enough." : goalT.shortPct + "% short.") +
+        (goalT.need !== null && !goalT.onTrack ? " You would need about " + pct1(goalT.need) + " a year, or to put more money in." : "")
+      : goalT.why === "young" ? "A projection appears after a year of history: a return measured over a few months jumps around too much to project."
+      : "A projection appears once the widget knows your annual return (it needs dated purchases and 30 days of history).",
+    (goalT.proj !== null ? "Cash is counted as it is, without growth. " : "") + goalNotForecast,
+  ].join("\n");
   // ---- the layout (12.12): what this window shows at its size, from ONE pure
   // function (layoutFor). ctx: what is on (enabled and has something to show),
   // text widths for the header lines and the tab row, and a height estimate
@@ -6516,6 +7425,7 @@ const renderWin = (state, dispatch) => {
   const newsFilterOn = (w) => !!newsCfg && (w >= 240 || !!newsQ || !!newsCfg.q);   // an active filter is never hidden
   const tw = (text, px) => String(text).length * K.MONO * px;
   const salesN = Array.isArray(d.sales) ? d.sales.filter((s) => s && typeof s.ticker === "string").length : 0;
+  const curN = d.currencies && Array.isArray(d.currencies.rows) ? d.currencies.rows.filter((r) => r && typeof r.iso === "string").length : 0;
   const rulesN = alertRulesOf(d).length;
   const rulesBad = d.priceAlerts && isFin(d.priceAlerts.invalid) ? d.priceAlerts.invalid : 0;
   const isObj = (o) => !!(o && typeof o === "object" && !Array.isArray(o));
@@ -6528,12 +7438,24 @@ const renderWin = (state, dispatch) => {
     "graph.bench": benchAny, "graph.late": lateAny, "graph.backtest": simShown,
     "panel.today": !empty, "panel.sectors": !empty, "panel.risk": !empty, "panel.days": !empty,
     "panel.sales": salesN > 0, "panel.income": isObj(d.dividends), "panel.rebalance": isObj(d.targets),
+    "panel.currencies": !!(d.currencies && isFin(d.currencies.foreign) && d.currencies.foreign > 0),
     "panel.priceAlerts": rulesN > 0 || rulesBad > 0, "panel.alerts": alerts.length > 0, "panel.news": true,
     // a tab row with nothing switched on in it goes; holdings needs a view (or the add
     // form of an empty portfolio, or a stock opened here); the footer one of its parts
     "graph.tabs": !!(rangeTabs.length || modesOn.length || inItems("graph.date") || readoutOn || inItems("graph.big") || from || state.mark),
     "panel.holdings": viewsOn.length > 0 || empty || !!focus,
     footer: inItems("footer.stats") || inItems("footer.updated") || inItems("footer.export") };
+  // 13.6: the goal line (none without a goal, or in a currency with no rate)
+  const goalV = goalT;   // goalView(d), made for goalTip above
+  has["header.goal"] = !!goalV && !goalV.noRate;
+  const goalNarrow = G.Wu - K.PAD_X < K.NARROW;
+  const goalOk = has["header.goal"];
+  const goalState = !goalOk ? null : goalV.reached ? "reached" : goalV.passed ? "passed"
+    : goalV.proj !== null ? (goalV.onTrack ? "ontrack" : "short") : "progress";
+  const goalBase = goalOk ? "goal " + money(goalV.goal) + " by " + byLabel(goalV.g.date) + " · " + goalV.pctNow + "%" : "";
+  const goalSuffix = goalState === "reached" ? " · reached" : goalState === "passed" ? " · date passed"
+    : goalState === "ontrack" ? " · on track"
+    : goalState === "short" ? " · " + goalV.shortPct + "% short" + (goalNarrow ? "" : " at your pace so far") : "";
   const on = {};
   FEATURES.forEach((f) => { if (has[f.id] !== false && enabled(win, f.id)) on[f.id] = true; });
   const EYE = K.EYEBROW;
@@ -6552,7 +7474,9 @@ const renderWin = (state, dispatch) => {
     "panel.risk": () => EYE + riskH,
     "panel.days": (w, R) => EYE + (dayRows.length ? 3 + Math.min(R.days, dayRows.length) * K.ROW_DAY + K.PAGER : K.RISK_ROW + 5),
     "panel.holdings": (w, R) => {
-      if (focus) return EYE + (focus.pending ? K.RISK_ROW + 8 : K.DETAIL + (hasPriceAlerts ? K.DETAIL_X : 0)) + (state.detailMsg ? K.RISK_ROW : 0);
+      if (focus) return EYE + (focus.pending ? K.RISK_ROW + 8 : K.DETAIL + (hasPriceAlerts ? K.DETAIL_X : 0)) + (state.detailMsg ? K.RISK_ROW : 0) +
+        (notesOn(d) && !focus.pending ? (noteOf(state, d, focus.ticker) ? K.NOTE_ROWS : K.STAT) +
+          (state.noteEdit ? K.NOTE_EDIT : 0) + (state.noteMsg ? K.RISK_ROW : 0) : 0);   // 13.6: note rows
       if (state.view === "watch") return EYE + addH + (watchRows.length ? watchRows.length * K.WATCH_ROW : K.EMPTY_MSG);
       if (empty) return EYE + addH + K.EMPTY_MSG;
       if (state.view === "map") return EYE + K.MAPTABS + addH + R.map;
@@ -6564,7 +7488,8 @@ const renderWin = (state, dispatch) => {
       return EYE + (calendar.length ? r * K.ROW_EARN : K.RISK_ROW + 3) + (r < calendar.length ? K.PAGER : 0);
     },
     "panel.sales": () => EYE + Math.min(salesN, state.salesExpanded === true ? salesN : SALES_ROWS) * K.SALE_ROW + (salesN > SALES_ROWS ? K.MORE : 0),
-    "panel.income": () => EYE + K.INCOME,
+    "panel.income": () => EYE + incomeH(d.dividends, incomeViewOf(state, d.dividends), K),
+    "panel.currencies": () => EYE + Math.min(curN, CUR_ROWS) * K.CUR_ROW + (curN > CUR_ROWS ? K.MORE : 0) + K.CUR_FIX,
     "panel.rebalance": () => EYE + K.REBAL_FIX + (d.targets && d.targets.set === true ? REBAL_ROWS * K.SALE_ROW : 0),
     "panel.priceAlerts": () => EYE + Math.min(rulesN, state.alertsExpanded ? rulesN : ALERT_ROWS) * K.RULE_ROW +
       (rulesN > ALERT_ROWS ? K.MORE : 0) + (state.alertMsg && !state.focusTicker ? K.RISK_ROW : 0),
@@ -6588,9 +7513,14 @@ const renderWin = (state, dispatch) => {
      { id: "header.totalReturn", w: tw("total return " + signedMoney(totals.totalReturn) + " (" + pct(totals.totalReturnPct) + ")", 9) + K.COL_GAP }]
       .concat(trOn && perfYr ? [{ id: "header.annual", w: tw(" · " + pct1(perfBlk.xirrPct) + "/yr", 9) }] : []),
     trOn ? [] : [{ id: "header.annual", w: perfOn ? tw(pct1(perfBlk.totalPct) + " total · " + pct1(perfBlk.xirrPct) + "/yr", 9) : 0 }],
+    [{ id: "header.goal", w: goalOk ? tw(goalBase + goalSuffix, 9) + K.GOAL_BAR : 0 }],
   ];
   const tabW = (label, tight) => tw(label, 9) + (tight ? K.CHIP_TIGHT : K.CHIP_PAD);
-  const dateOn = inItems("graph.date");
+  // 13.6: a narrow window (< K.NARROW) drops the date box and puts the change
+  // figure (and ⤢) at the end of the tabs line instead of beside it
+  const toolbarNarrow = G.Wu < K.NARROW;
+  const dateOn = inItems("graph.date") && !toolbarNarrow;
+  const tabsReadout = toolbarNarrow && !readoutOwnLine && !sectorMode && (readoutOn || inItems("graph.big")) ? K.TAB_READOUT : 0;
   const tabWs = rangeTabs.map((r) => tabW(r, btTabs.length > 0))
     .concat(rangeTabs.length && modesOn.length ? [K.TAB_SEP] : [], modesOn.map((m) => tabW(m === "pl" ? "p&l" : m)), dateOn ? [K.DATE_BOX] : []);
   if (from) tabWs.push(tabW("from " + fmtDayY(from.t) + " 00:00 ×") + 4);
@@ -6607,7 +7537,7 @@ const renderWin = (state, dispatch) => {
       days: dayRows.length || null, news: newsEntries.length || null, map: !focus && !empty && state.view === "map" },
     big: bigOn, sector: sectorMode, facets: sectorFacets, focusSector: !!focusName,
     focusList: focusName && focusName !== "portfolio" ? 5 + 2 * K.RISK_ROW : 0,
-    readoutOwnLine: readoutOwnLine, notesForced: !!state.dayMsg || sectorMode, benchLine: benchAny, lateLine: lateAny,
+    readoutOwnLine: readoutOwnLine, tabsReadout: tabsReadout, notesForced: !!state.dayMsg || sectorMode, benchLine: benchAny, lateLine: lateAny,
     simCap: simShown, benchPick: benchCtl && !!state.benchPick, loading: env.status === "loading",
     warn: !!((d.missingTickers || []).length || env.lastFetchFailed), welcome: welcomeOn,
     mapWide: state.view === "map", expanded: !!state.mapExpanded, tOn: tOn, undated: anyUndated,
@@ -6643,7 +7573,7 @@ const renderWin = (state, dispatch) => {
   // of the layout shows its own members, rotating when there are several)
   const sections = [
     { id: "panel.today", label: "today · " + curSymbol() + " movers · top 5", node: <SectionToday d={d} /> },
-    { id: "panel.sectors", label: "sectors · " + effRange + " trend · value · day · vol",
+    { id: "panel.sectors", label: "sectors · " + effRange + " trend · value · day · vol", short: "sectors · trend · day · vol",
       node: <SectionThemes d={d} range={effRange} dispatch={dispatch} w={L.unitW} /> },
     { id: "panel.risk", label: d.performance || (d.risk && (d.risk.real || d.risk.backtest)) ? "risk · drawdown · beta · volatility" : "risk · volatility (3 mo)",
       node: <SectionRisk d={d} /> },
@@ -6757,6 +7687,18 @@ const renderWin = (state, dispatch) => {
           </span>
         </div>
       ) : null}
+      {sh("header.goal") && goalOk ? (
+        <div className={rowFlex} style={lineStyle(4, { marginTop: 2 })} data-pw-goal={goalState}>
+          <span className={css`${mono} font-size: 9px; color: ${C.dim};`} title={goalTip}>
+            {"goal "}<span style={{ color: C.ink }}>{money(goalV.goal)}</span>
+            {" by " + byLabel(goalV.g.date) + " · "}<span style={{ color: C.ink }}>{goalV.pctNow + "%"}</span>
+            <span className={goalBar} data-pw-goal-bar="1">
+              <span style={{ display: "block", width: Math.min(100, Math.max(0, goalV.pctNow)) + "%", height: "100%", background: goalV.reached ? C.up : C.line }} />
+            </span>
+            <span style={{ color: goalState === "reached" || goalState === "ontrack" ? C.up : C.dim }}>{goalSuffix}</span>
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 
@@ -6781,8 +7723,9 @@ const renderWin = (state, dispatch) => {
   const welcomeBlock = !welcomeOn ? null : (
     <div className={welcomeCss} data-pw-panel="welcome" data-pw-est={LAYOUT_K.WELCOME} data-pw-demo={d.demoKind || undefined}>
       <div className={rowFlex} style={{ alignItems: "baseline" }}>
-        <span className={eyebrow} style={{ color: C.ink }}>{demoGone ? "demo removed — add your first holding:"
-          : "welcome — these 22 holdings are a demo; replace them with yours:"}</span>
+        <span className={eyebrow} style={{ color: C.ink }}>{demoGone ? "no holdings yet — add your first:"
+          : demoNOf(d) ? "welcome — these " + demoNOf(d) + " holdings are a demo; replace them with yours:"
+          : "welcome — these holdings are a demo; replace them with yours:"}</span>
         <span className={linkBtn} style={{ fontSize: 8.5 }} data-pw-welcome="hide"
           title="hide this card (⚙ → Portfolio → welcome card brings it back)"
           onClick={() => saveSetting("welcome", "false", dispatch)}>hide</span>
@@ -6794,7 +7737,7 @@ const renderWin = (state, dispatch) => {
           onClick={() => openImport(state, dispatch)}>import a list…</span>
         {demoGone ? null : <span className={welcomeChip} title="remove the demo holdings first (a backup of the file is kept)" data-pw-welcome="fresh"
           onClick={() => { if (!state.showAdd) dispatch({ type: "TOGGLE_ADD" });
-            dispatch({ type: "SET_PENDING", pending: { kind: "reset", cmd: helper(["sell", "--reset-all"]), label: "remove the 22 demo holdings? (a backup is kept; your settings and cash stay)" } }); }}>start fresh</span>}
+            dispatch({ type: "SET_PENDING", pending: { kind: "reset", cmd: helper(["sell", "--reset-all"]), label: "remove " + demoWord(demoNOf(d)) + "? (a backup is kept; your settings and cash stay)" } }); }}>start fresh</span>}
       </div>
       {demoGone ? null : (
         <div>
@@ -6915,6 +7858,22 @@ const renderWin = (state, dispatch) => {
       ) : ""}
     </span>
   );
+  // the graph toolbar's right end: the change figure and ⤢ (13.6: in a narrow
+  // window it moves onto the tabs line; marginLeft auto keeps it at the end)
+  const readoutInTabs = toolbarNarrow && L.tabWrap && !readoutOwnLine && !sectorMode;
+  const graphRightNode = (readoutOn && !readoutOwnLine) || (inItems("graph.big") && !sectorMode) ? (
+    <span data-pw-graph-readout={readoutInTabs ? "tabs" : "right"} style={{ marginLeft: "auto", whiteSpace: "nowrap", display: "flex", alignItems: "baseline", minWidth: 0 }}>
+      {readoutOwnLine || !readoutOn ? null : (   // too long (8-figure values, long dates): cut with "…" rather than wrap
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{readoutNode}</span>
+      )}
+      {sectorMode || !inItems("graph.big") ? null : (
+        <span className={tabBtn} style={{ marginLeft: 6, fontSize: 10, flex: "none" }}
+          title={bigOn ? "back to normal size" : "make the graph bigger"}
+          onClick={() => (state._disp ? changeWin(state, state._win.id, { graphBig: !bigOn }, dispatch)
+            : savePref("graphBig", !bigOn, dispatch))}>{bigOn ? "⤡" : "⤢"}</span>
+      )}
+    </span>
+  ) : null;
 
   /* -------- expanded heatmap: the map takes over the whole widget -------- */
   if (state.mapExpanded) {
@@ -6944,19 +7903,21 @@ const renderWin = (state, dispatch) => {
     if (!list.length) return null;
     const pinned = list.length > 1 && state.pinnedSection !== null ? list.find((sc) => sc.i === state.pinnedSection) || null : null;
     const cur = pinned || list[Math.floor(state.rot / TICKS_PER_PAGE) % list.length];
+    // 13.6: a label too long for the column gives way to its short form; never wraps
+    const lbl = cur.short && cur.label.length * K.EYE_CH + list.length * 11 > L.unitW ? cur.short : cur.label;
     return (
       <div className={first ? undefined : sectionGap} {...attrs}>
         <div className={rowFlex}>
-          <span className={eyebrow} style={narrow ? CUT : undefined} title={narrow ? cur.label : undefined}>
-            {cur.label}{pinned ? " ⌖" : ""}
+          <span className={eyebrow} style={Object.assign({ flex: "1 1 auto" }, CUT)} title={cur.label}>
+            {lbl}{pinned ? <span data-pw-pinned="section" title="staying on this page — click the lit dot to let them turn again"> ⌖</span> : null}
           </span>
           {list.length > 1 ? (
-            <span style={narrow ? { flex: "none" } : undefined}>
+            <span style={{ flex: "none" }}>
               {list.map((sc) => (
                 <span key={sc.label}
                   onClick={() => dispatch({ type: "SET_SECTION", section: sc.i })}
                   className={dot}
-                  title={sc.label + (state.pinnedSection === sc.i ? " (pinned — click to resume rotating)" : " — click to pin")}
+                  title={sc.label + (state.pinnedSection === sc.i ? " — staying here · click again to let the boxes take turns" : " — click to stay on this one")}
                   style={{ color: sc === cur ? C.ink : C.dim }}>●</span>
               ))}
             </span>
@@ -7002,6 +7963,10 @@ const renderWin = (state, dispatch) => {
                     look={look} range={state.detailRange} dispatch={dispatch} chartW={L.priceW}
                     tg={tOn && en("detail.target") && bucketFor(d, focus.targetKey) ? Object.assign({ band: bandOf(d) }, bucketFor(d, focus.targetKey)) : null} />
                 )}
+                {!focus.pending && notesOn(d) ? (   // 13.6 data: a note and a price target
+                  <NoteRows p={focus} d={d} state={state} dispatch={dispatch} alertsOn={hasPriceAlerts && en("detail.alerts")}
+                    narrow={L.CW < LAYOUT_K.NARROW} />
+                ) : null}
                 {!focus.pending && hasPriceAlerts && (en("detail.alerts") || en("detail.news")) ? (   // 12.9+ data: the alert box and headlines exist
                   <DetailExtras p={focus} d={d} state={state} dispatch={dispatch} alerts={en("detail.alerts")} news={en("detail.news")} />
                 ) : null}
@@ -7018,7 +7983,7 @@ const renderWin = (state, dispatch) => {
                         {" " + (page + 1) + "/" + pages}
                       </span>
                     )}
-                    {state.view === "list" && state.pinnedPage !== null ? " ⌖" : ""}
+                    {state.view === "list" && state.pinnedPage !== null ? <span data-pw-pinned="holdings" title="staying on this page — click the lit dot to let them turn again"> ⌖</span> : null}
                   </span>
                   <span style={narrow ? { flex: "none", whiteSpace: "nowrap" } : undefined}>
                     {addOn ? (
@@ -7080,9 +8045,11 @@ const renderWin = (state, dispatch) => {
                     </div>
                   ) : watchRows.map((w) => (
                     <div key={w.ticker} className={rowFlex} style={{ marginTop: 4 }}>
-                      <span className={mono} onClick={() => openStock(w.ticker, dispatch, state)} title={(w.name || "") + " — click for details"}
+                      <span className={mono} onClick={() => openStock(w.ticker, dispatch, state)}
+                        title={(w.name || "") + " — click for details" + (nOn && noteOf(state, d, w.ticker) ? "\n" + noteTip(noteOf(state, d, w.ticker), w) : "")}
                         style={withMarks(marksOf(w.ticker), { fontSize: 10, width: 60, cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" })}>
                         {marksOf(w.ticker) ? <span style={TICKER_SHRINK}>{w.ticker}</span> : w.ticker}{w.stale ? <span style={{ color: C.down }} title="last known price">!</span> : null}<Bell rules={rulesOn(w.ticker)} />
+                        {nOn ? <NoteMark e={noteOf(state, d, w.ticker)} p={w} /> : null}
                       </span>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 9, color: C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", paddingRight: 6 }}>{w.name || w.theme}</span>
                       {L.watchCells.spark ? <Spark values={w.spark} w={L.watchSparkW === LAYOUT_K.SPARK ? undefined : L.watchSparkW} /> : null}
@@ -7120,7 +8087,8 @@ const renderWin = (state, dispatch) => {
                           ? { background: "rgba(var(--pw-fg), 0.07)", borderRadius: 3 } : {})}>
                       <span className={mono}
                         onClick={() => openStock(p.ticker, dispatch, state)}
-                        title={(p.name || "") + " — click for details" + (high52Tip(p) ? "\n" + high52Tip(p) : "")}
+                        title={(p.name || "") + " — click for details" + (high52Tip(p) ? "\n" + high52Tip(p) : "") +
+                          (nOn && noteOf(state, d, p.ticker) ? "\n" + noteTip(noteOf(state, d, p.ticker), p) : "")}
                         style={withMarks(marked, anyUndated
                           ? { fontSize: 10, flex: 1, minWidth: 52, cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
                           : { fontSize: 10, width: 52, cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden" })}>
@@ -7128,6 +8096,7 @@ const renderWin = (state, dispatch) => {
                         {p.basisDerived ? <span style={{ color: C.amber }} title="≈ estimated cost (no purchase price given)">≈</span> : null}
                         {p.stale ? <span style={{ color: C.down }} title="last known price — the latest fetch failed">!</span> : null}
                         <Bell rules={rulesOn(p.ticker)} />
+                        {nOn ? <NoteMark e={noteOf(state, d, p.ticker)} p={p} /> : null}
                         {dotOn ? <NewsMark items={markNewsOf(d, p.ticker, p.dayChangePct)} /> : null}
                         {p.undated === true ? (
                           <span title={UNDATED_TIP} style={{ fontSize: 7, color: C.dim, marginLeft: 3, letterSpacing: "0.02em" }}>undated</span>
@@ -7168,7 +8137,7 @@ const renderWin = (state, dispatch) => {
                       <span key={i} data-pw-page-dot={i}
                         onClick={() => dispatch({ type: "SET_PAGE", page: i })}
                         className={pageDot}
-                        title={"page " + (i + 1) + (state.pinnedPage === i ? " (pinned — click to resume rotating)" : " — click to pin this page")}
+                        title={"page " + (i + 1) + (state.pinnedPage === i ? " — staying here · click again to let the pages turn every 30 s" : " — click to stay on this page")}
                         style={i === page ? { color: C.ink, background: "rgba(var(--pw-fg), 0.12)" } : { color: C.dim }}>●</span>
                     ))}
                     <span data-pw-page-next="1" className={pageDot} title="next page — it then stays there (click the lit dot to let the pages turn again)" style={{ color: C.dim }}
@@ -7472,7 +8441,8 @@ const renderWin = (state, dispatch) => {
     if (id === "panel.holdings") return holdingsNode(first, attrs);
     if (id === "panel.earnings") return earningsNode(first, attrs);
     if (id === "panel.sales") return <SalesPanel d={d} totals={totals} expanded={state.salesExpanded === true} dispatch={dispatch} first={first} pw={attrs} />;
-    if (id === "panel.income") return <IncomePanel d={d} first={first} pw={attrs} />;
+    if (id === "panel.income") return <IncomePanel d={d} view={incomeViewOf(state, d.dividends)} dispatch={dispatch} first={first} pw={attrs} />;
+    if (id === "panel.currencies") return <CurrenciesPanel d={d} w={L.unitW} first={first} pw={attrs} />;
     if (id === "panel.rebalance") return <RebalancePanel d={d} state={state} dispatch={dispatch} first={first} pw={attrs} />;
     if (id === "panel.priceAlerts") return <PriceAlertsPanel d={d} state={state} dispatch={dispatch} first={first} pw={attrs} />;
     if (id === "panel.alerts") return alertsNode(first, attrs);
@@ -7527,7 +8497,7 @@ const renderWin = (state, dispatch) => {
               </span>
             ))}
             {dateOn ? (
-            <input className={dayInputCss} placeholder="YYYY-MM-DD" value={state.dayInput}
+            <input className={dayInputCss} placeholder="YYYY-MM-DD" value={state.dayInput} data-pw-day-input="1"
               title="type any day (2026-03-14, or just 03-14): you see what your portfolio was worth then — press Enter to start the graph on that day"
               onChange={(ev) => onDayInput(ev.target.value, d, state, dispatch)}
               onKeyDown={(ev) => onDayKey(ev, d, state, dispatch)}
@@ -7546,20 +8516,9 @@ const renderWin = (state, dispatch) => {
                 start here
               </span>
             ) : null}
+            {readoutInTabs ? graphRightNode : null}
           </div>
-          {(readoutOn && !readoutOwnLine) || (inItems("graph.big") && !sectorMode) ? (
-          <span style={{ marginLeft: "auto", whiteSpace: "nowrap", display: "flex", alignItems: "baseline", minWidth: 0 }}>
-            {readoutOwnLine || !readoutOn ? null : (   // too long (8-figure values, long dates): cut with "…" rather than wrap
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{readoutNode}</span>
-            )}
-            {sectorMode || !inItems("graph.big") ? null : (
-              <span className={tabBtn} style={{ marginLeft: 6, fontSize: 10, flex: "none" }}
-                title={bigOn ? "back to normal size" : "make the graph bigger"}
-                onClick={() => (state._disp ? changeWin(state, state._win.id, { graphBig: !bigOn }, dispatch)
-                  : savePref("graphBig", !bigOn, dispatch))}>{bigOn ? "⤡" : "⤢"}</span>
-            )}
-          </span>
-          ) : null}
+          {readoutInTabs ? null : graphRightNode}
         </div>
         ) : null}
         {sh("graph.tabs") && readoutOwnLine ? (
@@ -7701,13 +8660,13 @@ const renderWin = (state, dispatch) => {
             {benchCap ? (
               <span title={"thin grey line: " + String(bench.symbol) + " bought with the same money on the same days as your purchases" +
                 " (prices only — dividends left out on both sides)" + (bench.stale ? "\nits latest price is stale" : "") +
-                (benchCtl ? "\npick another index with \"index ▾\"" : bench.source === "setting" ? "\nset with _settings.benchmark"
-                  : "\nthe default for " + d.currency + " — change it with _settings.benchmark (\"none\" hides it)")}>
+                (benchCtl ? "\npick another index with \"index ▾\"" : bench.source === "setting" ? "\nchosen in ⚙ → Portfolio → compare with an index"
+                  : "\nthe default for " + d.currency + " — change it in ⚙ → Portfolio → compare with an index (none hides it)")}>
                 {/* each "a · " piece stays whole: the line may break only after a dot */}
-                {(G.Wu < 400 && benchCtl ? benchCap.leadShort : benchCap.lead).split(" · ").slice(0, -1).map((part, i) => (
+                {(G.Wu < K.NARROW && benchCtl ? benchCap.leadShort : benchCap.lead).split(" · ").slice(0, -1).map((part, i) => (
                   <span key={"bl" + i} style={{ whiteSpace: "nowrap" }}>{part + " · "}</span>
                 ))}
-                <span style={{ whiteSpace: "nowrap", color: benchCap.diff ? upDown(benchCap.diff) : C.dim }}>{G.Wu < 400 && benchCap.short ? benchCap.short : benchCap.verdict}</span>
+                <span style={{ whiteSpace: "nowrap", color: benchCap.diff ? upDown(benchCap.diff) : C.dim }}>{G.Wu < K.NARROW && benchCap.short ? benchCap.short : benchCap.verdict}</span>
               </span>
             ) : null}
             {benchNote ? (

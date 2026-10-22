@@ -70,6 +70,7 @@ commit it and back off; anything else = do not commit cache.
 import argparse
 import bisect
 import json
+import logging
 import math
 import os
 import random
@@ -79,7 +80,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -102,6 +103,9 @@ EARNINGS_TTL = 86400            # re-check earnings date daily
 DIVS_TTL = 86400                # re-check a holding's past dividends daily,
 DIVS_EMPTY_TTL = 7 * 86400      # weekly when it has paid none
 DIVS_PERIODS = ("2y", "5y", "10y", "max")   # dividend history reach, shortest first
+UPCOMING_DAYS = 90              # 13.6 income panel: next ex-dates this far ahead,
+UPCOMING_MAX = 8                #   at most this many
+INCOME_YEARS = 5                # ... and received income for this many calendar years
 META_RETRY = 3600               # after a failed meta lookup, retry in ~1h
 BARS_TTL = 3600                 # re-download daily/hourly bars hourly while
                                 # their market is open (pre/after hours too);
@@ -131,7 +135,15 @@ HISTORY_RECHECK = 86400         # a top-up (or a symbol Yahoo had no long bars f
                                 # or delisted stock never gets newer bars
 HISTORY_SPLIT_TOL = 0.02        # long vs fresh closes on shared days may differ this
                                 # much (median ratio) before the long ones are refetched
-HISTORY_WORKERS = 4             # parallel downloads in the history job
+HISTORY_WORKERS = 2             # parallel downloads in the history job (13.6: was 4)
+HISTORY_GAP = 0.5               # seconds between the starts of two history
+                                # downloads, all workers together
+try:                            # PORTFOLIO_HISTORY_GAP (0..5) replaces it (tests: 0)
+    _gap = float(os.environ.get("PORTFOLIO_HISTORY_GAP", ""))
+    if 0 <= _gap <= 5:
+        HISTORY_GAP = _gap
+except ValueError:
+    pass
 LATE_START_DAYS = 7             # "starts later" = first close this long after ALL's start
 BACKTEST_COVER = 0.5            # the backtest starts once holdings worth this share
                                 # of today's value have prices
@@ -187,6 +199,8 @@ DEFAULT_SETTINGS = {
     "opacity": 0.88,               # the window background, 0.3 (glass) to 1 (solid)
     "updates": True,               # look for a newer release on GitHub once a day
     "welcome": True,               # the welcome card while the demo portfolio is shown
+    # 13.6
+    "goal": None,  # {"value", "date", "cur"}: ⚙ → Portfolio → goal; None = off
 }
 THEMES = ("dark", "light", "auto")
 OPACITY_RANGE = (0.3, 1.0)
@@ -423,7 +437,11 @@ EXCHANGE_HOURS = {
 }
 # crypto ("BTC-USD": a currency after the dash) trades around the clock,
 # and so do exchange rates ("EURUSD=X") as far as the refresh is concerned
-CRYPTO_RE = re.compile(r"^[A-Z0-9]+-[A-Z]{3}$")
+CRYPTO_QUOTES = ("USD", "EUR", "GBP", "CAD", "JPY", "AUD", "CHF", "NZD", "SEK", "NOK",
+                 "DKK", "HKD", "SGD", "KRW", "INR", "BRL", "MXN", "ZAR", "CNY", "PLN",
+                 "TRY", "BTC", "ETH", "USDT", "USDC")   # a crypto pair's quote side
+# BTC-USD, ETH-BTC: crypto (open around the clock); KO-PRA (a preferred): not
+CRYPTO_RE = re.compile(r"^[A-Z0-9]+-(?:%s)$" % "|".join(CRYPTO_QUOTES))
 
 
 def local_epoch(day, hm, tz):
@@ -623,7 +641,11 @@ def ui_settings(path, settings):
             # cash on hand and the money put in (13.5): stored next to
             # _settings (_cash / _invested), shown in ⚙ → Portfolio
             "cash": ui_cash(top.get("_cash")),
-            "invested": ui_invested(top.get("_invested"))}
+            "invested": ui_invested(top.get("_invested")),
+            # the target mix as saved (13.6, ⚙ → Portfolio)
+            "targets": ui_targets(now.get("targets")),
+            # the goal (13.6): None = off
+            "goal": ui_goal(now.get("goal"))}
 
 
 def ui_amount(value):
@@ -655,9 +677,45 @@ def ui_cash(value):
     return out
 
 
+def ui_targets(value):
+    """_settings.targets as the ⚙ editor shows it (13.6): {name: pct} in
+    the saved order (whole numbers as int, else 2 decimals; the first of a
+    name listed twice), or None when unset, empty or unreadable."""
+    if not isinstance(value, dict) or not value:
+        return None
+    try:
+        import rebalance
+        entries, _ = rebalance.parse_targets(value)
+        out = {}
+        for k, p in entries or []:
+            if k not in out:
+                out[k] = int(p) if p == int(p) else round(p, 2)
+        return out or None
+    except Exception:
+        return None
+
+
 def ui_invested(value):
     """_invested (the money put in) as an amount > 0, else None."""
     return ui_amount(value)
+
+
+def ui_goal(value):
+    """_settings.goal (13.6) as {"value": amount > 0, "date": "YYYY-MM-DD",
+    "cur": ISO code or None (= the display currency)}, else None (off).
+    A date already passed is kept: the widget says "date passed". The
+    widget works out the progress and the projection itself."""
+    if not isinstance(value, dict):
+        return None
+    n = ui_amount(value.get("value"))
+    d = value.get("date")
+    if n is None or not isinstance(d, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+        return None
+    try:
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return {"value": n, "date": d, "cur": currency_code(value.get("cur"))}
 
 
 def ui_theme(value):
@@ -1569,6 +1627,7 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
             or "exDividend" not in entry:
         earnings = None
         ex_div = None
+        pay = None
         fetched_at = jittered(now, EARNINGS_TTL)
         try:
             cal = yf_module.Ticker(ticker).calendar
@@ -1576,6 +1635,7 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
             if isinstance(cal, dict):
                 dates = cal.get("Earnings Date")
                 ex_div = cal.get("Ex-Dividend Date")
+                pay = cal.get("Dividend Date")
             elif cal is not None and hasattr(cal, "loc"):
                 try:
                     dates = list(cal.loc["Earnings Date"])
@@ -1585,7 +1645,14 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
                     ex_div = list(cal.loc["Ex-Dividend Date"])[0]
                 except Exception:
                     ex_div = None
+                try:
+                    pay = list(cal.loc["Dividend Date"])[0]
+                except Exception:
+                    pay = None
             ex_div = ymd_or_none(ex_div)
+            # 13.6: the pay date of the announced dividend (same call, no
+            # extra request; fills in at the next daily calendar refresh)
+            pay = ymd_or_none(pay)
             if dates:
                 today = datetime.now(MARKET_TZ).date()
                 parsed = []
@@ -1599,9 +1666,11 @@ def fetch_meta(ticker, yf_module, meta, cache_dir, spot=None, divs_period=None):
         except Exception:
             earnings = entry.get("earnings")
             ex_div = entry.get("exDividend")
+            pay = entry.get("payDate")
             fetched_at = now - EARNINGS_TTL + META_RETRY
         entry["earnings"] = earnings
         entry["exDividend"] = ex_div
+        entry["payDate"] = pay
         entry["earningsFetchedAt"] = fetched_at
 
     if not implied_move_wanted(entry):
@@ -2033,7 +2102,48 @@ def feed_ssl_context():
 # long price history (the background job; see the module docstring)
 # --------------------------------------------------------------------------
 
-def fetch_long(symbol, yf_module, start):
+class Pacer(object):
+    """Spaces calls out: wait() returns at most once every `gap` seconds,
+    across all threads together (a no-op when gap <= 0)."""
+
+    def __init__(self, gap):
+        self.gap = gap
+        self.lock = threading.Lock()
+        self.next_t = 0.0
+
+    def wait(self):
+        if self.gap <= 0:
+            return
+        with self.lock:
+            now = time.time()
+            t = max(now, self.next_t)
+            self.next_t = t + self.gap
+        if t > now:
+            time.sleep(t - now)
+
+
+class _Stopped(Exception):
+    """A history item not done because Yahoo said too many requests."""
+
+
+class _YahooBusyLog(logging.Handler):
+    """Sets `stop` when yfinance logs a rate limit (it can log a 429 and
+    still return an empty frame, which must not count as "no history")."""
+
+    def __init__(self, stop):
+        logging.Handler.__init__(self, level=logging.DEBUG)
+        self.stop = stop
+
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            if "Too Many Requests" in msg or "Rate limited" in msg or "RateLimit" in msg:
+                self.stop.set()
+        except Exception:
+            pass
+
+
+def fetch_long(symbol, yf_module, start, pace=None):
     """Yahoo's daily closes of `symbol` from HISTORY_SLACK_DAYS before
     `start` (YYYY-MM-DD, or "max" for everything) up to yesterday — today's
     bar is still moving, and the normal refresh has it anyway. Closes are
@@ -2041,6 +2151,8 @@ def fetch_long(symbol, yf_module, start):
     (delisted, or listed today) is [] — a result, not an error: raising
     would retry it every HISTORY_RETRY_AFTER forever."""
     t = yf_module.Ticker(symbol)
+    if pace is not None:
+        pace()
     if start == "max":
         frame = t.history(period="max", interval="1d", auto_adjust=False)
     else:
@@ -2051,7 +2163,7 @@ def fetch_long(symbol, yf_module, start):
             if d < today and c > 0]
 
 
-def fetch_history_item(item, entry, start, yf_module):
+def fetch_history_item(item, entry, start, yf_module, pace=None):
     """The new history_bars.json entry for one plan item: "full" downloads
     from `start`; "topup" downloads from just before the cached bars end and
     appends the new days — or starts over when the shared days disagree (a
@@ -2059,7 +2171,7 @@ def fetch_history_item(item, entry, start, yf_module):
     also when it had nothing new (use_long waits HISTORY_RECHECK on it)."""
     if item.get("mode") == "topup" and isinstance(entry, dict) and entry.get("daily"):
         old = [tuple(b) for b in entry["daily"]]
-        new = fetch_long(item["symbol"], yf_module, old[-1][0])
+        new = fetch_long(item["symbol"], yf_module, old[-1][0], pace)
         if not new:          # nothing at all any more (halted, delisted)
             return dict(entry, t=round(time.time(), 3))
         if closes_agree([b for b in old if b[0] >= new[0][0]], new) is True:
@@ -2067,7 +2179,7 @@ def fetch_history_item(item, entry, start, yf_module):
             return {"from": entry.get("from"), "t": round(time.time(), 3),
                     "daily": [list(b) for b in old] + [b for b in new if b[0] > last]}
     return {"from": start, "t": round(time.time(), 3),
-            "daily": fetch_long(item["symbol"], yf_module, start)}
+            "daily": fetch_long(item["symbol"], yf_module, start, pace)}
 
 
 def fetch_history(cache_dir, yf_module, progress_file=None):
@@ -2108,32 +2220,65 @@ def fetch_history(cache_dir, yf_module, progress_file=None):
              and not fetched_since_plan(it["symbol"])]
     ok, done = [True], [0]
     fetched = {}
+    # Yahoo said too many requests (an exception, or only a yfinance log
+    # line): the rest waits for the next try (HISTORY_RETRY_AFTER); what
+    # is fetched by then is kept, so the job resumes where it stopped
+    stop = threading.Event()
+    pacer = Pacer(HISTORY_GAP)
 
     def job(item):
+        if stop.is_set():
+            raise _Stopped()
+        entry = hist.get(item["symbol"])
         last_err = None
         for attempt in range(2):
             try:
-                return fetch_history_item(item, hist.get(item["symbol"]), start,
-                                          yf_module)
-            except Exception as e:   # retry once
+                res = fetch_history_item(item, entry, start, yf_module, pacer.wait)
+            except Exception as e:   # retry once, but never into a rate limit
+                if is_rate_limit(e):
+                    stop.set()
+                    raise _Stopped()
                 last_err = e
-                if attempt == 0:
+                if attempt == 0 and not stop.is_set():
                     time.sleep(2)
+                    continue
+                if stop.is_set():
+                    raise _Stopped()
+                raise
+            # an empty answer while throttled is not "no history"
+            if stop.is_set() and (not res.get("daily") or (
+                    isinstance(entry, dict) and res.get("daily") == entry.get("daily"))):
+                raise _Stopped()
+            return res
         raise last_err
 
     write_progress(progress_file, 0, len(items), "starting")
     if items:
-        with ThreadPoolExecutor(max_workers=HISTORY_WORKERS) as ex:
-            futures = {ex.submit(job, it): it["symbol"] for it in items}
-            for fut in as_completed(futures):
-                sym = futures[fut]
-                try:
-                    fetched[sym] = fut.result()
-                except Exception as e:
-                    ok[0] = False
-                    print("history: %s failed: %s" % (sym, e), file=sys.stderr)
-                done[0] += 1
-                write_progress(progress_file, done[0], len(items), sym)
+        busy_log = _YahooBusyLog(stop)
+        yf_log = logging.getLogger("yfinance")
+        yf_log.addHandler(busy_log)
+        try:
+            with ThreadPoolExecutor(max_workers=HISTORY_WORKERS) as ex:
+                futures = {ex.submit(job, it): it["symbol"] for it in items}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        fetched[sym] = fut.result()
+                    except (_Stopped, CancelledError):
+                        ok[0] = False
+                    except Exception as e:
+                        ok[0] = False
+                        print("history: %s failed: %s" % (sym, e), file=sys.stderr)
+                    done[0] += 1
+                    write_progress(progress_file, done[0], len(items), sym)
+                    if stop.is_set():   # the ones not started yet: not now
+                        for other in futures:
+                            other.cancel()
+        finally:
+            yf_log.removeHandler(busy_log)
+        if stop.is_set():
+            print("history: Yahoo said too many requests — stopped after %d of %d;"
+                  " the rest follows later" % (len(fetched), len(items)), file=sys.stderr)
 
     keep = plan.get("keep")
     pruned = ({s: v for s, v in hist.items() if s in keep}
@@ -2315,6 +2460,66 @@ def div_shares(dated, sold, d):
     share rule for divs_received and the XIRR dividend flows."""
     return (held_on(dated, shift_date(d, -1))
             + sum(sh for ld, sh, sd in sold if ld < d <= sd))
+
+
+def divs_paid(divs, lots, today_str, sold=()):
+    """[(ex-date, per share, shares)] oldest first: the payments behind
+    divs_received (ex-date <= today, shares > 0 by div_shares on DATED lots
+    + sold slices). sum(a*sh) == divs_received(...)."""
+    dated = {"lots": [l for l in lots if l["date"]]}
+    out = []
+    for d, a in divs:
+        if d <= today_str:
+            sh = div_shares(dated, sold, d)
+            if sh > 0:
+                out.append((d, a, sh))
+    return out
+
+
+def divs_years(paid_by_tk, rate_by_tk, since, today_str, keep=5):
+    """Received income by calendar year of the ex-date, at today's rate:
+    ([{"y", "received", "payers"(, "ytd")}] newest first for the last `keep`
+    years from the first dated purchase (`since`) or first payment on,
+    the sum of the older years). The rows + the older sum == received."""
+    cy = int(today_str[:4])
+    sums = {}
+    for tk, paid in paid_by_tk.items():
+        rate = rate_by_tk.get(tk) or 0
+        for d, a, sh in paid:
+            key = (int(d[:4]), tk)
+            sums[key] = sums.get(key, 0.0) + a * sh * rate
+    starts = [int(since[:4])] if since else []
+    starts += [y for y, _ in sums]
+    if not starts:
+        return [], 0.0
+    first = min(starts)
+    lo = cy - keep + 1
+    years = []
+    for y in range(cy, max(lo, first) - 1, -1):
+        vals = [v for (yy, _), v in sums.items() if yy == y]
+        row = {"y": y, "received": rnd(sum(vals)),
+               "payers": sum(1 for v in vals if v > 0)}
+        if y == cy:
+            row["ytd"] = True
+        years.append(row)
+    earlier = rnd(sum(v for (yy, _), v in sums.items() if yy < lo))
+    return years, earlier
+
+
+def next_div(divs, ttm, ex_announced, today_str, horizon=90):
+    """A held ticker's next dividend: the announced ex-date while it is
+    still ahead (last payment's amount), else last year's oldest payment
+    one year on, marked estimated, when that falls within `horizon` days;
+    else None. {"exDate", "perShare", "est"}."""
+    if ex_announced and ex_announced >= today_str:
+        return {"exDate": ex_announced,
+                "perShare": divs[-1][1] if divs else None, "est": False}
+    if ttm:
+        d0, a0 = ttm[0]
+        nd = shift_date(d0, 365)
+        if nd <= shift_date(today_str, horizon):
+            return {"exDate": nd, "perShare": a0, "est": True}
+    return None
 
 
 def divs_months(ttm, today_str):
@@ -3367,6 +3572,107 @@ def growth_index(positions, currencies, results, fx, live, sold, by_ticker,
     return out, left_out
 
 
+def currency_exposure(rows, positions, currencies, derived, cash, fx, display,
+                      total_value, fx_complete):
+    """data.json "currencies" (13.6): share of the portfolio per currency
+    (holdings + cash), today's price/currency-move split, and the gain since
+    purchase split into prices (at today's rate, = row pl) and the currency
+    move since each purchase. None when there are no rows and no cash."""
+    if not rows and not cash:
+        return None
+    keys = ("value", "cash", "dayPrice", "dayFx", "pl", "basisNow",
+            "basisBuy", "nativeCost")
+    by = {}
+
+    def acc(iso):
+        if iso not in by:
+            by[iso] = dict({k: 0.0 for k in keys}, holdings=0, why=None)
+        return by[iso]
+    for p in rows:
+        tk = p["ticker"]
+        cur = currencies.get(tk, p.get("currency"))
+        iso, mult = split_currency(cur)
+        a = acc(iso)
+        a["holdings"] += 1
+        for k, f in (("value", "value"), ("dayPrice", "priceEffect"),
+                     ("dayFx", "fxEffect"), ("pl", "pl"), ("basisNow", "costBasis")):
+            a[k] += p.get(f) or 0.0
+        if iso == display:
+            a["basisBuy"] += p.get("costBasis") or 0.0
+            continue
+        if a["why"]:
+            continue
+        for lot in (positions.get(tk) or {}).get("lots", []):
+            if p.get("costUnknown"):
+                a["why"] = "cost"
+                break
+            if not lot["date"]:
+                a["why"] = "undated"
+                break
+            cost = lot["avgCost"] if lot["avgCost"] is not None else derived.get((tk, lot["date"]))
+            if cost is None:
+                a["why"] = "cost"
+                break
+            first = fx.daily_first(cur)
+            if first is None:
+                a["why"] = "norate"
+                break
+            if lot["date"] < first and not fx_complete(iso):
+                a["why"] = "loading"
+                break
+            r = fx.factor_at(cur, lot["date"], "daily")
+            if r is None:
+                a["why"] = "norate"
+                break
+            a["basisBuy"] += cost * lot["shares"] * r
+            a["nativeCost"] += cost * lot["shares"] * mult
+    for cur, amount in cash.items():
+        f = fx.factor(cur)
+        if f is None:
+            continue
+        a = acc(split_currency(cur)[0])
+        a["value"] += amount * f
+        a["cash"] += amount * f
+    out = []
+    for iso in sorted(by, key=lambda k: -by[k]["value"]):
+        a = by[iso]
+        if a["value"] <= 0 and not a["holdings"]:
+            continue
+        why = a["why"]
+        pl, now_b, buy_b = a["pl"], a["basisNow"], a["basisBuy"]
+        since = None if why else (0.0 if iso == display else now_b - buy_b)
+        a["since"] = since
+        out.append({
+            "iso": iso, "value": rnd(a["value"]),
+            "pct": rnd(a["value"] / total_value * 100 if total_value else 0),
+            "holdings": a["holdings"], "cash": rnd(a["cash"]) or 0,
+            "rate": rnd(fx.now.get(iso, 1.0), 4),
+            "rateDayPct": rnd((fx.now[iso] / fx.prev[iso] - 1) * 100)
+            if iso != display and fx.prev.get(iso) and iso in fx.now else 0,
+            "dayPrice": rnd(a["dayPrice"]), "dayFx": rnd(a["dayFx"]),
+            "pl": rnd(pl), "plPct": rnd(pl / now_b * 100) if now_b else None,
+            "fxSince": rnd(since),
+            "plFx": None if why else rnd(pl + since),
+            "plFxPct": None if why or not buy_b else rnd((pl + since) / buy_b * 100),
+            "rateBuy": None if why or iso == display or not a["nativeCost"]
+            else rnd(buy_b / a["nativeCost"], 4),
+            "why": why,
+        })
+    whys = [r["why"] for r in out if r["why"]]
+    known = not whys
+    return {
+        "display": display, "rows": out,
+        "foreign": sum(1 for r in out if r["iso"] != display),
+        "dayPrice": rnd(sum(by[r["iso"]]["dayPrice"] for r in out)),
+        "dayFx": rnd(sum(by[r["iso"]]["dayFx"] for r in out)),
+        "pl": rnd(sum(by[r["iso"]]["pl"] for r in out)),
+        "fxSince": rnd(sum(by[r["iso"]]["since"] for r in out)) if known else None,
+        "plFx": rnd(sum(by[r["iso"]]["pl"] + by[r["iso"]]["since"] for r in out))
+        if known else None,
+        "why": whys[0] if whys else None,
+    }
+
+
 PERF_REASONS = ("none", "undated", "cost", "sales", "young", "loading")
 
 
@@ -3633,6 +3939,63 @@ def price_alert_rule(entry):
         v = int(v)
     return {"id": "%s:%s:%s" % (tk, kind, num_text(v)), "ticker": tk,
             "kind": kind, "level": v}, None
+
+
+# 13.6: a note and a price target per stock (holding_meta.py), in
+# positions.json under "_notes": {"KO": {"note", "target", "side", "at"}}.
+# Keyed by ticker, so selling everything keeps them; 13.5 skips "_" keys.
+NOTE_MAX = 200                  # characters in one note (one line)
+MAX_NOTES = 500                 # entries in _notes
+TARGET_MAX = 1e9                # a price target is > 0 and at most this
+NOTE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def clean_note(text):
+    """One line: control characters become spaces, runs of whitespace one
+    space, no space at either end. "" for anything but a str."""
+    if not isinstance(text, str):
+        return ""
+    text = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in text)
+    return " ".join(text.split())
+
+
+def load_notes(raw):
+    """positions.json -> {TICKER: {note, target, side, at}} from _notes, in
+    file order, at most MAX_NOTES. Bad entries / fields are left out; an
+    entry with neither a note nor a target is dropped. Never raises."""
+    try:
+        items = raw.get("_notes") if isinstance(raw, dict) else None
+        if not isinstance(items, dict):
+            return {}
+        out = {}
+        for key, e in items.items():
+            if len(out) >= MAX_NOTES:
+                break
+            tk = key.strip().upper() if isinstance(key, str) else ""
+            if not isinstance(e, dict) or not SYMBOL_RE.match(tk) or tk in out:
+                continue
+            note = clean_note(e.get("note"))[:NOTE_MAX] or None
+            t = e.get("target")
+            target = None
+            if isinstance(t, (int, float)) and not isinstance(t, bool) \
+                    and math.isfinite(t) and 0 < t <= TARGET_MAX:
+                target = float(t)
+            if note is None and target is None:
+                continue
+            side = e.get("side") if e.get("side") in ("above", "below") else None
+            at = e.get("at")
+            at = at if isinstance(at, str) and NOTE_DATE_RE.match(at) else None
+            out[tk] = {"note": note, "target": target, "side": side, "at": at}
+        return out
+    except Exception:
+        return {}
+
+
+def notes_out(path, fallback):
+    """data.json "notes" from positions.json as it is NOW (holding_meta.py
+    may have saved one during this fetch); fallback when unreadable."""
+    raw = read_json(path, None)
+    return load_notes(raw) if isinstance(raw, dict) else fallback
 
 
 def load_price_alerts(raw):
@@ -4190,6 +4553,8 @@ def main(argv=None, yf_module=None):
     # price alerts (_alerts): adding one is the opt-in, _settings.alerts
     # is only for the big daily moves
     price_rules, alerts_invalid = load_price_alerts(raw_positions)
+    # notes and price targets (_notes, holding_meta.py): passed through
+    notes = load_notes(raw_positions)
     sold = sold_slices(realized_records)
     display = resolve_currency("CAD" if args.cad
                                else args.currency or settings["currency"])
@@ -4798,11 +5163,15 @@ def main(argv=None, yf_module=None):
             div_annual = sum(a for _, a in ttm) * shares * rate_now
             div_received = divs_received(divs, pos["lots"], div_today,
                                          sold.get(tk, ())) * rate_now
+            # 13.6: the payments behind div_received (income by year)
+            paid = divs_paid(divs, pos["lots"], div_today, sold.get(tk, ()))
         else:
             ttm = []
             div_annual = (m.get("dividendRate") or 0) * shares * rate_now
             div_received = 0.0
-        div_info[tk] = {"divs": divs, "ttm": ttm, "factor": shares * rate_now}
+            paid = []
+        div_info[tk] = {"divs": divs, "ttm": ttm, "factor": shares * rate_now,
+                        "paid": paid, "rate": rate_now}
         high52, high52_date, from_high52 = high_52w(r.get("daily"), price, div_today)
         rows.append({
             "ticker": tk,
@@ -4978,6 +5347,34 @@ def main(argv=None, yf_module=None):
                 lots = positions[p["ticker"]]["lots"]
                 since += [l["date"] for l in lots if l["date"]]
                 partial = partial or any(not l["date"] for l in lots)
+        # 13.6: next ex-dates of holdings (announced, else last year's + 1 y,
+        # marked est) and received income by calendar year of the ex-date
+        upcoming = []
+        for p in rows:
+            tk = p["ticker"]
+            info = div_info[tk]
+            if info["divs"] is None or not (p["dividendAnnual"] or 0) > 0:
+                continue
+            n = next_div(info["divs"], info["ttm"], p["exDividendDate"],
+                         today_str, UPCOMING_DAYS)
+            if n is None:
+                continue
+            pay = lot_date((meta.get(tk) or {}).get("payDate"))
+            if n["est"] or not pay or \
+                    not n["exDate"] <= pay <= shift_date(n["exDate"], 90):
+                pay = None
+            per = n["perShare"]
+            upcoming.append({
+                "ticker": tk, "exDate": n["exDate"], "payDate": pay,
+                "perShare": per, "currency": p["currency"],
+                "amount": (rnd(per * info["factor"]) or None)
+                    if per is not None else None,
+                "est": n["est"]})
+        upcoming.sort(key=lambda e: (e["exDate"], -(e["amount"] or 0)))
+        years, earlier = divs_years(
+            {p["ticker"]: div_info[p["ticker"]]["paid"] for p in rows},
+            {p["ticker"]: div_info[p["ticker"]]["rate"] for p in rows},
+            min(since) if since else None, today_str, INCOME_YEARS)
         dividends = {
             "annual": rnd(total_annual_div),
             "yieldPct": rnd(total_annual_div / total_value * 100) if total_value else None,
@@ -4990,6 +5387,9 @@ def main(argv=None, yf_module=None):
                        for (ym, _), v in zip(divs_months([], today_str), months)],
             "payers": sum(1 for p in rows if (p["dividendAnnual"] or 0) > 0),
             "fallback": fallback,
+            "upcoming": upcoming[:UPCOMING_MAX],
+            "years": years,
+            "receivedEarlier": earlier,
         }
 
     # announced ex-dividend dates still ahead (the calendar's, not the
@@ -5107,11 +5507,13 @@ def main(argv=None, yf_module=None):
                  for tk in div_info}
     for tk in sold_only:
         perf_divs[tk] = clean_divs((meta.get(tk) or {}).get("divs"))
+    # a currency's daily rate history reaches back to the cover start
+    fx_complete = lambda iso: iso in fx_results and fx_results[iso][0] in covered
     performance, growth_rows = build_performance(
         rows, positions, currencies, derived, realized_records,
         perf_divs, sold, fx, display, today_str, results,
         bench_index.on_date if bench_index else None, covered,
-        lambda iso: iso in fx_results and fx_results[iso][0] in covered)
+        fx_complete)
     late = late_starts(results, positions, et_date(all_start), covered)
     # backtest: today's holdings before the first day (its own series); the
     # prices from the cover start to today are computed once and shared
@@ -5207,6 +5609,13 @@ def main(argv=None, yf_module=None):
                  "changePct": rnd((fx.now[iso] / fx.prev[iso] - 1) * 100
                                   if fx.prev.get(iso) else 0)}
                 for iso in sorted(exposure, key=lambda k: -exposure[k])]
+    # 13.6: currency panel (a bug here must not cost the refresh)
+    try:
+        currencies_out = currency_exposure(rows, positions, currencies, derived,
+                                           cash, fx, display, total_value, fx_complete)
+    except Exception as e:
+        print("currencies skipped: %s" % e, file=sys.stderr)
+        currencies_out = None
 
     # US exchange holidays: the clock says "open" but nothing has traded
     session = market_session()
@@ -5303,6 +5712,8 @@ def main(argv=None, yf_module=None):
         # display-currency value of one unit of each quote currency (the
         # buy/sell helpers use it to keep _invested in the right currency)
         "fxRates": {iso: rnd(rate, 6) for iso, rate in fx.now.items()},
+        # 13.6: share per currency + currency moves today and since purchase (null: nothing held)
+        "currencies": currencies_out,
         "alertsOn": alerts_on,
         "cash": rnd(cash_total),
         "totals": {
@@ -5398,6 +5809,8 @@ def main(argv=None, yf_module=None):
         "priceAlerts": current_alert_statuses(
             args.positions, alert_statuses, alerts_invalid,
             {p["ticker"]: p["currency"] for p in rows + watch_rows}),
+        # {TICKER: {note, target, side, at}} from _notes; {} when none — its presence means a 13.6+ tracker
+        "notes": notes_out(args.positions, notes),
         # headlines of today's big movers: {"on": false} when _settings.news
         # is off, else {on, movePct, items {ticker: [{title, source, time,
         # url}] newest first, <= 3; movers with headlines only}, t {ticker:
