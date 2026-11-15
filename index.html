@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Portfolio Widget</title>
+<meta name="description" content="The Portfolio desktop widget for macOS (Übersicht), running in your browser on a demo portfolio of 22 US stocks.">
+<meta name="theme-color" content="#121726">
+<meta name="pw-api" content="https://game-lobby-play.netlify.app/api/yf">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='0.5' y='0.5' width='15' height='15' rx='4' fill='%231f2a44'/%3E%3Cpolyline points='3,11 6,7.5 8.5,9.5 13,4.5' fill='none' stroke='%236fd3a5' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bar-h: 28px;
+    --bar-bg: rgba(18, 22, 34, 0.72);
+    --bar-ink: #eef2f7;
+    --bar-dim: rgba(238, 242, 247, 0.62);
+    --accent: #6fd3a5;
+    --wall: #121726;
+  }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    overflow: hidden;
+    background: var(--wall);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* the desktop wallpaper */
+  #pw-wall {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(1200px 700px at 12% 8%, rgba(74, 98, 186, 0.55), transparent 60%),
+      radial-gradient(900px 640px at 88% 92%, rgba(156, 72, 132, 0.45), transparent 62%),
+      radial-gradient(700px 500px at 70% 20%, rgba(40, 140, 150, 0.30), transparent 60%),
+      linear-gradient(160deg, #182038 0%, #121726 55%, #1a1428 100%);
+  }
+  #pw-wall::after {   /* soft hills at the bottom */
+    content: ""; position: absolute; left: -10%; right: -10%; bottom: -30vh; height: 60vh;
+    background: radial-gradient(60% 50% at 50% 50%, rgba(10, 14, 24, 0.55), transparent 70%);
+  }
+
+  /* the menu bar */
+  #pw-bar {
+    position: fixed; top: 0; left: 0; right: 0; height: var(--bar-h); z-index: 50;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--bar-ink); font-size: 13px; line-height: 1; white-space: nowrap;
+    user-select: none; -webkit-user-select: none;
+  }
+  #pw-bar .app { display: flex; align-items: center; gap: 7px; font-weight: 650; }
+  #pw-bar .app svg { flex: none; }
+  #pw-bar .sub { color: var(--bar-dim); font-weight: 400; }
+  #pw-bar .spacer { flex: 1; }
+  #pw-bar .asof { color: var(--bar-dim); font-size: 12px; }
+  #pw-bar a, #pw-bar button {
+    font: inherit; color: var(--bar-ink); background: none; border: 0; padding: 4px 8px;
+    border-radius: 5px; cursor: pointer; text-decoration: none;
+  }
+  #pw-bar a:hover, #pw-bar button:hover { background: rgba(255, 255, 255, 0.12); }
+  #pw-bar a.get { color: #0d1a14; background: var(--accent); font-weight: 600; padding: 4px 10px; }
+  #pw-bar a.get:hover { background: #8be3bb; }
+  #pw-bar .clock { color: var(--bar-ink); font-variant-numeric: tabular-nums; }
+  @media (max-width: 760px) { #pw-bar .sub, #pw-bar .clock { display: none; } }
+  @media (max-width: 560px) { #pw-bar .asof { display: none; } #pw-bar { gap: 6px; } }
+
+  /* the widget's spot on this desktop (Übersicht would put it top-right) */
+  #pw-root.widget {
+    position: absolute;
+    top: calc(var(--bar-h) + 14px) !important;
+    right: auto !important;
+    left: max(8px, calc(50vw - 332px)) !important;
+    width: min(664px, calc(100vw - 16px)) !important;
+    z-index: 10;
+  }
+  .pw-crash {
+    margin: 0; padding: 14px 16px; border-radius: 12px; color: #f3d6d6;
+    background: rgba(40, 18, 22, 0.9); font: 12px/1.5 "SF Mono", Menlo, monospace; white-space: pre-wrap;
+  }
+  #pw-loading { color: var(--bar-dim); font-size: 13px; padding: 14px 4px; }
+
+  /* the first-visit hint */
+  #pw-hint {
+    position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 60;
+    transform: translateX(-50%);
+    width: min(560px, calc(100vw - 32px)); box-sizing: border-box;
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 12px 14px; border-radius: 12px;
+    background: rgba(18, 22, 34, 0.9); border: 1px solid rgba(255, 255, 255, 0.1);
+    -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    color: var(--bar-ink); font-size: 13px; line-height: 1.45;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    transition: opacity .35s ease, transform .35s ease;
+  }
+  #pw-hint.gone { opacity: 0; transform: translate(-50%, 12px); pointer-events: none; }
+  #pw-hint b { font-weight: 650; }
+  #pw-hint .dim { color: var(--bar-dim); }
+  #pw-hint button {
+    flex: none; font: inherit; font-size: 18px; line-height: 1; color: var(--bar-dim);
+    background: none; border: 0; padding: 0 2px; cursor: pointer;
+  }
+  #pw-hint button:hover { color: var(--bar-ink); }
+</style>
+</head>
+<body>
+<div id="pw-wall"></div>
+
+<header id="pw-bar">
+  <span class="app">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="0.5" y="0.5" width="15" height="15" rx="4" fill="#1f2a44" stroke="rgba(255,255,255,.25)"/>
+      <polyline points="3,11 6,7.5 8.5,9.5 13,4.5" fill="none" stroke="#6fd3a5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Portfolio <span class="sub">widget for macOS</span>
+  </span>
+  <span class="spacer"></span>
+  <span class="asof" id="pw-asof">starting…</span>
+  <button type="button" id="pw-reset" title="Put the demo back the way it started" hidden>Reset</button>
+  <a class="get" href="https://github.com/onnipackalen/uebersicht-portfolio" target="_blank" rel="noopener">Get it free</a>
+  <span class="clock" id="pw-clock"></span>
+</header>
+
+<div id="pw-root"><div id="pw-loading">Loading the widget…</div></div>
+
+<div id="pw-hint" class="gone" role="note">
+  <div id="pw-hint-text">
+    <b>This is the real widget, with live prices.</b> It starts on a demo portfolio:
+    <span class="dim">click <b>+</b> to add your own stocks (or "start fresh" in the welcome card), ⚙ for the look and windows,
+    any stock for its chart. Your holdings stay in this browser.</span>
+  </div>
+  <button type="button" id="pw-hint-x" aria-label="Close">×</button>
+</div>
+
+<script>
+  (function () {
+    var clock = document.getElementById("pw-clock");
+    var tick = function () {
+      var d = new Date();
+      clock.textContent = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) + "  " +
+        d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    };
+    tick(); setInterval(tick, 15000);
+
+    // Reset exists only for the recorded demo; the live app's portfolio is
+    // the visitor's own (the widget has its own "start fresh" and resets)
+    var resetBtn = document.getElementById("pw-reset");
+    resetBtn.addEventListener("click", function () {
+      try { localStorage.removeItem("portfolio-widget.frame"); } catch (e) {}
+      if (window.PW_WEB && window.PW_WEB.reset) window.PW_WEB.reset(); else location.reload();
+    });
+    var asof = document.getElementById("pw-asof");
+
+    var hint = document.getElementById("pw-hint");
+    var HINT_KEY = "pw-web-hint-seen";
+    var seen = false;
+    try { seen = localStorage.getItem(HINT_KEY) === "1"; } catch (e) {}
+    var closeHint = function () {
+      hint.classList.add("gone");
+      try { localStorage.setItem(HINT_KEY, "1"); } catch (e) {}
+    };
+    document.getElementById("pw-hint-x").addEventListener("click", closeHint);
+
+    var hinted = false;
+    document.addEventListener("pw-ready", function (ev) {
+      var det = ev.detail || {};
+      if (det.mode === "live") {
+        asof.textContent = det.booted ? "Live prices · saved in this browser" : "Starting the engine…";
+        resetBtn.hidden = true;
+      } else {
+        var d = det.data || {};
+        var t = d.generatedAt ? new Date(d.generatedAt) : null;
+        asof.textContent = (det.fallback ? "Offline demo" : "Demo portfolio") + (t && !isNaN(t) ? " · prices from " +
+          t.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "");
+        resetBtn.hidden = false;
+        document.getElementById("pw-hint-text").innerHTML = "<b>This is the real widget</b>, running on a recorded demo portfolio of 22 US stocks." +
+          (det.fallback ? " <span class=\"dim\">The live engine couldn't start in this browser, so prices aren't live.</span>" :
+            " <span class=\"dim\">Hover the graph, switch ranges, click a stock for its chart, try ⚙ for windows and themes.</span>");
+      }
+      if (!seen && !hinted) {
+        hinted = true;
+        setTimeout(function () { hint.classList.remove("gone"); }, 900);
+        setTimeout(closeHint, 16000);
+      }
+    });
+  })();
+</script>
+<script src="app.js"></script>
+</body>
+</html>
