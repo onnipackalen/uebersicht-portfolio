@@ -2541,12 +2541,20 @@ if (wantDemo) {
   rt.start(widget, be, mount);
   emit({
     mode: "live"
-  });
-  be.ready.then(() => emit({
+  }); // is the price feed there? (a static host has none, and a paused feed
+  // answers with an error page) - checked while the engine starts
+
+  const feedUp = fetch(API + "?k=chart&s=SPY&range=5d&interval=1d", {
+    cache: "no-store"
+  }).then(r => r.json().then(j => r.ok && j && j.chart ? true : Promise.reject(new Error("HTTP " + r.status)))).catch(e => Promise.reject(new Error("price feed unavailable (" + String(e.message || e) + ")")));
+  let fellBack = false;
+  Promise.all([be.ready, feedUp]).then(() => emit({
     mode: "live",
     booted: true
   }), e => {
-    console.warn("live engine failed, showing the recorded demo:", e);
+    if (fellBack) return;
+    fellBack = true;
+    console.warn("live mode unavailable, showing the recorded demo:", e);
     loadRec().then(rec => {
       const rb = rt.replayBackend(rec);
       window.PW_WEB = {
